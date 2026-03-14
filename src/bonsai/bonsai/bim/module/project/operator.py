@@ -973,7 +973,7 @@ class LoadProject(bpy.types.Operator, IFCFileSelector, ImportHelper):
     use_relative_path: bpy.props.BoolProperty(  # pyright: ignore[reportRedeclaration]
         name="Use Relative Path",
         description="Store the IFC project path relative to the .blend file. Requires .blend file to be saved",
-        default=False,
+        default=True,
     )
     should_start_fresh_session: bpy.props.BoolProperty(  # pyright: ignore[reportRedeclaration]
         name="Should Start Fresh Session",
@@ -1895,7 +1895,7 @@ class ExportIFC(bpy.types.Operator, ExportHelper):
         name="Should Save As", default=False, options={"HIDDEN"}
     )  # pyright: ignore[reportRedeclaration]
     use_relative_path: bpy.props.BoolProperty(
-        name="Use Relative Path", default=False
+        name="Use Relative Path", default=True
     )  # pyright: ignore[reportRedeclaration]
 
     if TYPE_CHECKING:
