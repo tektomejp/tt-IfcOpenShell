@@ -1496,6 +1496,15 @@ IfcParse::InstanceStreamer::InstanceStreamer(const IfcParse::schema_definition* 
     storage_.references_to_resolve = &references_to_resolve_;
 }
 
+IfcParse::impl::in_memory_file_storage::~in_memory_file_storage() {
+    // Only delete tokens in lazy mode (when owned_stream_ is set).
+    // In normal mode, tokens was already deleted in read_from_stream().
+    if (owned_stream_) {
+        delete tokens;
+        tokens = nullptr;
+    }
+}
+
 void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileReader* s, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass, bool lazy) {
     // Initialize a "C" locale for locale-independent
     // number parsing. See comment above on line 41.

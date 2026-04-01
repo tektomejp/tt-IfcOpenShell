@@ -218,7 +218,7 @@ namespace IfcParse {
             typedef entity_instance_by_name_t::iterator iterator;
 
             in_memory_file_storage(IfcParse::IfcFile* f = nullptr) : tokens(nullptr), file(f), schema(nullptr) {}
-            ~in_memory_file_storage() { delete tokens; }
+            ~in_memory_file_storage();
             in_memory_file_storage(const in_memory_file_storage&) = delete;
             in_memory_file_storage(const in_memory_file_storage&&) = delete;
 
