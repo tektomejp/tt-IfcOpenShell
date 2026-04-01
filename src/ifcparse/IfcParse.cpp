@@ -1212,14 +1212,14 @@ bool IfcParse::IfcFile::initialize(const std::string& fn, bool mmap) {
 IfcFile::IfcFile(const uninitialized_tag&)
     : schema_(nullptr), max_id_(0), _header(this), good_(file_open_status::UNKNOWN), ifcroot_type_(nullptr) {}
 
-bool IfcParse::IfcFile::initialize(const std::string& path, filetype ty, bool readonly) {
+bool IfcParse::IfcFile::initialize(const std::string& path, filetype ty, bool readonly, bool lazy) {
     if (ty == FT_AUTODETECT) {
         ty = guess_file_type(path);
     }
     if (ty == FT_IFCSPF) {
         FileReader s(path);
         storage_.emplace<1>(this);
-        std::get<impl::in_memory_file_storage>(storage_).read_from_stream(&s, schema_, max_id_, types_to_bypass_loading_);
+        std::get<impl::in_memory_file_storage>(storage_).read_from_stream(&s, schema_, max_id_, types_to_bypass_loading_, lazy);
 
         if ((good_ = std::get<impl::in_memory_file_storage>(storage_).good_)) {
             // @todo unify these names, it's already confusing enough as it stands
@@ -1261,12 +1261,12 @@ void IfcParse::IfcFile::bypass_type(const std::string& type_name) {
     types_to_bypass_loading_.insert(type_name);
 }
 
-IfcFile::IfcFile(const std::string& path, filetype ty, bool readonly)
+IfcFile::IfcFile(const std::string& path, filetype ty, bool readonly, bool lazy)
     : schema_(nullptr)
     , max_id_(0)
     , _header(this)
 {
-    initialize(path, ty, readonly);
+    initialize(path, ty, readonly, lazy);
 }
 
 IfcFile::IfcFile(std::istream& stream, int length)
@@ -1496,7 +1496,7 @@ IfcParse::InstanceStreamer::InstanceStreamer(const IfcParse::schema_definition* 
     storage_.references_to_resolve = &references_to_resolve_;
 }
 
-void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileReader* s, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass) {
+void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileReader* s, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass, bool lazy) {
     // Initialize a "C" locale for locale-independent
     // number parsing. See comment above on line 41.
     init_locale();
@@ -1544,6 +1544,7 @@ void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileRead
 
 	InstanceStreamer streamer(schema, tokens);
     streamer.bypassTypes(typed_to_bypass);
+    streamer.setLazyLoading(lazy);
 
     Logger::Status("Scanning file...");
 
@@ -1564,8 +1565,8 @@ void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileRead
 
         if (instance->declaration().is(*ifcroot_type_)) {
             try {
-                // @nb here we know we're using in-memory so 'nullptr, nullptr, 0' is safe
-                const std::string guid = instance->data().get_attribute_value(nullptr, nullptr, 0, 0);
+                // Pass 'this' as storage so lazy entities can materialize via the file pointer
+                const std::string guid = instance->data().get_attribute_value(this, &instance->declaration(), current_id, 0);
                 if (byguid_.find(guid) != byguid_.end()) {
                     std::stringstream ss;
                     ss << "Instance encountered with non-unique GlobalId " << guid;
@@ -1614,7 +1615,16 @@ void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileRead
 
     Logger::Status("\rDone scanning file   ");
 
-    delete tokens;
+    if (!lazy) {
+        delete tokens;
+        tokens = nullptr;
+    } else {
+        // Clone the stream so it survives after the caller's FileReader is destroyed.
+        // Then recreate the lexer pointing to the owned clone.
+        owned_stream_ = std::make_unique<FileReader>(s->clone());
+        delete tokens;
+        tokens = new IfcSpfLexer(owned_stream_.get());
+    }
 
     if (good_ != file_open_status::SUCCESS) {
         return;

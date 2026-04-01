@@ -243,7 +243,7 @@ public:
     /// <param name="path">UTF-8 file path to an IFC-SPF file or RocksDB database directory</param>
     /// <param name="ty">File type of the path</param>
     /// <param name="readonly">Whether to open in read-only mode, only supported on RocksDB databases</param>
-    IfcFile(const std::string& path, filetype ty=FT_AUTODETECT, bool readonly=false);
+    IfcFile(const std::string& path, filetype ty=FT_AUTODETECT, bool readonly=false, bool lazy=false);
 
     /// <summary>
 	/// Constructs an IfcFile object from a stream containing IFC-SPF data.
@@ -275,7 +275,7 @@ public:
     /// </summary>
     IfcFile(const uninitialized_tag&);
 
-    bool initialize(const std::string& path, filetype ty = FT_AUTODETECT, bool readonly = false);
+    bool initialize(const std::string& path, filetype ty = FT_AUTODETECT, bool readonly = false, bool lazy = false);
 #ifdef USE_MMAP
     bool initialize(const std::string& path, bool mmap);
 #endif

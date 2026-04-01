@@ -29,6 +29,7 @@ namespace rocksdb {
 #include <iostream>
 #include <vector>
 #include <list>
+#include <memory>
 
 #ifndef SWIG
 
@@ -195,7 +196,7 @@ namespace IfcParse {
             }
 
             IfcParse::IfcSpfLexer* tokens;
-            // IfcParse::FileReader* stream;
+            std::unique_ptr<IfcParse::FileReader> owned_stream_;  // kept alive for lazy mode
 
             // Either one of these needs to be set
             IfcParse::IfcFile* file;
@@ -217,6 +218,7 @@ namespace IfcParse {
             typedef entity_instance_by_name_t::iterator iterator;
 
             in_memory_file_storage(IfcParse::IfcFile* f = nullptr) : tokens(nullptr), file(f), schema(nullptr) {}
+            ~in_memory_file_storage() { delete tokens; }
             in_memory_file_storage(const in_memory_file_storage&) = delete;
             in_memory_file_storage(const in_memory_file_storage&&) = delete;
 
@@ -268,7 +270,7 @@ namespace IfcParse {
 
             // @todo is this still used
             IfcEntityInstanceData read(unsigned int index);
-            void read_from_stream(IfcParse::FileReader* stream, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass);
+            void read_from_stream(IfcParse::FileReader* stream, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass, bool lazy = false);
 
             file_open_status good_ = file_open_status::SUCCESS;
 

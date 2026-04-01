@@ -710,10 +710,10 @@ private:
 %newobject stream_from_string;
 
 %inline %{
-	IfcParse::IfcFile* open(const std::string& fn, bool readonly=false) {
+	IfcParse::IfcFile* open(const std::string& fn, bool readonly=false, bool lazy=false) {
 		IfcParse::IfcFile* f;
 		Py_BEGIN_ALLOW_THREADS;
-		f = new IfcParse::IfcFile(fn, IfcParse::FT_AUTODETECT, readonly);
+		f = new IfcParse::IfcFile(fn, IfcParse::FT_AUTODETECT, readonly, lazy);
 		Py_END_ALLOW_THREADS;
 		return f;
 	}

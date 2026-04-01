@@ -102,7 +102,7 @@ mamba create -n ifcopenshell-dev -c conda-forge \
   swig \
   hdf5
 
-mamba activate ifcopenshell-dev
+conda activate ifcopenshell-dev
 
 cd tt-ifcopenshell
 mkdir -p build && cd build
