@@ -40,6 +40,7 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/logic/tribool.hpp>
 #include <boost/dynamic_bitset.hpp>
+#include <limits>
 
 class IFC_PARSE_API EnumerationReference {
 private:
@@ -160,10 +161,25 @@ struct IFC_PARSE_API MutableAttributeValue {
 };
 
 namespace IfcParse {
+    class IfcFile;
     namespace impl {
         class IFC_PARSE_API rocks_db_file_storage;
+        class IFC_PARSE_API in_memory_file_storage;
     }
 }
+
+// Sentinel value indicating storage is not in lazy mode
+constexpr size_t LAZY_OFFSET_NONE = std::numeric_limits<size_t>::max();
+
+/// Marker struct for constructing IfcEntityInstanceData in lazy SPF mode.
+/// Attributes are not parsed until first access; only the file offset is stored.
+struct IFC_PARSE_API lazy_spf_attribute_storage {
+    size_t file_offset;
+
+    explicit lazy_spf_attribute_storage(size_t offset)
+        : file_offset(offset)
+    {}
+};
 
 #ifdef IFOPSH_WITH_ROCKSDB
 
@@ -411,18 +427,35 @@ public:
 class IFC_PARSE_API IfcEntityInstanceData {
   public:
       // Since rocks_db_attribute_storage has no members this is not a variant<in_memory, rocks> but in_memory*, where nullptr means a rocks_db_attribute_storage is constructed on the fly given the context from instance data.
-      in_memory_attribute_storage* storage_;
+      // For lazy SPF loading: storage_ is null AND lazy_file_offset_ != LAZY_OFFSET_NONE.
+      // These are mutable to allow transparent lazy loading on const access.
+      mutable in_memory_attribute_storage* storage_;
+
+      // File offset for lazy SPF loading. When LAZY_OFFSET_NONE, this storage is not lazy.
+      // When storage_ is null and lazy_file_offset_ != LAZY_OFFSET_NONE, attributes are
+      // parsed on first access from this file position.
+      mutable size_t lazy_file_offset_ = LAZY_OFFSET_NONE;
 
       IfcEntityInstanceData(in_memory_attribute_storage&& storage)
           : storage_(new in_memory_attribute_storage(std::move(storage)))
+          , lazy_file_offset_(LAZY_OFFSET_NONE)
       {}
 
       IfcEntityInstanceData(rocks_db_attribute_storage&&)
           : storage_(nullptr)
+          , lazy_file_offset_(LAZY_OFFSET_NONE)
+      {}
+
+      /// Construct in lazy SPF mode: no attribute data is parsed yet.
+      /// When attributes are accessed, they will be parsed from the given file offset.
+      IfcEntityInstanceData(lazy_spf_attribute_storage&& lazy)
+          : storage_(nullptr)
+          , lazy_file_offset_(lazy.file_offset)
       {}
 
       IfcEntityInstanceData(IfcEntityInstanceData&& other) noexcept
           : storage_(std::exchange(other.storage_, nullptr))
+          , lazy_file_offset_(std::exchange(other.lazy_file_offset_, LAZY_OFFSET_NONE))
       {}
 
       // No copy-constructor/-assignment anymore because we need the instance for storage model context
@@ -433,6 +466,7 @@ class IFC_PARSE_API IfcEntityInstanceData {
           if (this != &other) {
               delete storage_;
               storage_ = std::exchange(other.storage_, nullptr);
+              lazy_file_offset_ = std::exchange(other.lazy_file_offset_, LAZY_OFFSET_NONE);
           }
           return *this;
       }
@@ -440,6 +474,19 @@ class IFC_PARSE_API IfcEntityInstanceData {
       ~IfcEntityInstanceData() {
           delete storage_;
       }
+
+      /// Returns true if this instance data is in lazy SPF mode (not yet materialized).
+      bool is_lazy() const {
+          return storage_ == nullptr && lazy_file_offset_ != LAZY_OFFSET_NONE;
+      }
+
+      /// Materialize lazy instance data by parsing from the stored file offset.
+      /// After this call, storage_ will be populated and lazy_file_offset_ reset to LAZY_OFFSET_NONE.
+      /// @param file The IfcFile to parse from (provides access to FileReader and schema).
+      /// @param decl The entity declaration for this instance.
+      /// @param identity The instance ID.
+      /// This is const because lazy loading is a transparent optimization (mutable storage_).
+      void materialize(IfcParse::IfcFile* file, const IfcParse::declaration* decl, std::size_t identity) const;
 
     AttributeValue get_attribute_value(void* storage, const IfcParse::declaration*, std::size_t identity, size_t index) const;
 

@@ -100,9 +100,16 @@ private:
     int yielded_header_instances_ = 0;
     std::vector<const declaration*> types_to_bypass_;
     std::vector<unsigned> bypassed_instances_;
+    bool lazy_loading_ = false;  // When true, store file offset instead of parsing attributes
 
   public:
 	bool coerce_attribute_count = true;
+
+    /// Enable or disable lazy loading mode.
+    /// When enabled, entity attributes are not parsed during readInstance().
+    /// Instead, only the file offset is recorded and attributes are parsed on first access.
+    void setLazyLoading(bool enable) { lazy_loading_ = enable; }
+    bool isLazyLoading() const { return lazy_loading_; }
 
     operator bool() const {
         return good_ && !lexer_->stream->eof();

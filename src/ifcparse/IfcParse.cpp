@@ -2854,11 +2854,75 @@ IfcEntityInstanceData::IfcEntityInstanceData(const IfcEntityInstanceData& data)
 
 AttributeValue IfcEntityInstanceData::get_attribute_value(void* storage, const IfcParse::declaration* decl, std::size_t identity, size_t index) const
 {
+    // Handle lazy SPF storage: materialize on first access
+    if (is_lazy()) {
+        // Get file from in_memory_file_storage (storage points to it when we're lazy)
+        auto* mem_storage = static_cast<IfcParse::impl::in_memory_file_storage*>(storage);
+        if (mem_storage && mem_storage->file) {
+            materialize(mem_storage->file, decl, identity);
+        } else {
+            throw IfcParse::IfcException("Cannot materialize lazy entity: no file context available");
+        }
+    }
+
     if (storage_) {
         return AttributeValue(storage_, (uint8_t)index);
     } else {
         return AttributeValue((IfcParse::impl::rocks_db_file_storage*)storage, identity, decl, (uint8_t) index);
     }
+}
+
+void IfcEntityInstanceData::materialize(IfcParse::IfcFile* file, const IfcParse::declaration* decl, std::size_t identity) const {
+    if (!is_lazy()) {
+        return; // Already materialized or not in lazy mode
+    }
+
+    // Get the storage from file
+    auto* mem_storage = std::get_if<IfcParse::impl::in_memory_file_storage>(&file->storage_);
+    if (!mem_storage) {
+        throw IfcParse::IfcException("Cannot materialize lazy entity: file is not using in-memory storage");
+    }
+
+    // Clone the file reader and seek to the stored offset
+    auto reader = mem_storage->tokens->stream->clone();
+    reader.seek(lazy_file_offset_);
+
+    // Create a new lexer for re-parsing
+    IfcParse::IfcSpfLexer lexer(&reader);
+
+    // Read the entity type token (IFCENTITYTYPE)
+    Token datatype = lexer.Next();
+    if (!IfcParse::TokenFunc::isKeyword(datatype)) {
+        throw IfcParse::IfcException("Unexpected token while materializing lazy entity at offset " + std::to_string(lazy_file_offset_));
+    }
+
+    // Skip the '(' after entity type
+    lexer.Next();
+
+    // Set up parsing context
+    IfcParse::parse_context ps;
+    IfcParse::unresolved_references refs;
+
+    // Create temporary in_memory_file_storage for parsing
+    IfcParse::impl::in_memory_file_storage temp_storage(file);
+    temp_storage.tokens = &lexer;
+    temp_storage.schema = file->schema();
+    temp_storage.references_to_resolve = &refs;
+
+    // Parse the attributes
+    temp_storage.load(identity, decl->as_entity(), ps, -1);
+
+    // Construct the attribute storage
+    auto data = ps.construct(identity, refs, decl, boost::none, -1, true);
+
+    // Move the storage to this instance
+    storage_ = data.storage_;
+    data.storage_ = nullptr;
+    lazy_file_offset_ = LAZY_OFFSET_NONE;
+
+    // Note: unresolved references (refs) would need to be resolved, but for now
+    // we rely on the file having already resolved references during initial parse.
+    // Lazy materialization is most useful when the entity has no forward references.
 }
 
 bool IfcParse::impl::rocks_db_file_storage::read_schema(const IfcParse::schema_definition*& schema) {

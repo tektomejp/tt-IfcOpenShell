@@ -665,6 +665,32 @@ void IfcParse::InstanceStreamer::bypassTypes(const std::set<std::string>& type_n
     }
  }
 
+namespace {
+    /// Skip tokens until the closing ')' at the current nesting level, then continue to ';'.
+    /// Assumes we are positioned just after the opening '(' of the entity.
+    /// This is a fast-path for lazy parsing: we record the offset but don't parse the content.
+    void skip_to_semicolon(IfcParse::IfcSpfLexer* lexer) {
+        int depth = 1;  // We're already past the opening '('
+        while (depth > 0) {
+            IfcParse::Token next = lexer->Next();
+            if (next.type == IfcParse::Token_NONE) {
+                break;  // EOF or error
+            }
+            if (IfcParse::TokenFunc::isOperator(next, '(')) {
+                depth++;
+            } else if (IfcParse::TokenFunc::isOperator(next, ')')) {
+                depth--;
+            }
+        }
+        // Now skip to the semicolon
+        IfcParse::Token semi = lexer->Next();
+        if (!IfcParse::TokenFunc::isOperator(semi, ';')) {
+            // Seek back if we overshot
+            // For now just ignore - the next instance parsing will handle it
+        }
+    }
+}
+
 
 std::optional<std::tuple<size_t, const IfcParse::declaration*, IfcEntityInstanceData>> IfcParse::InstanceStreamer::readInstance() {
     std::optional<std::tuple<size_t, const IfcParse::declaration*, IfcEntityInstanceData>> return_value;
@@ -723,31 +749,58 @@ std::optional<std::tuple<size_t, const IfcParse::declaration*, IfcEntityInstance
                 }
             }
 
-            parse_context ps;
-            lexer_->Next();
-            try {
-                storage_.load(current_id, entity_type->as_entity(), ps, -1);
-            } catch (const IfcInvalidTokenException& e) {
-                good_ = file_open_status::INVALID_SYNTAX;
-                Logger::Error(e);
-                break;
+            if (lazy_loading_) {
+                // Lazy mode: record file offset and skip to semicolon without parsing
+                // The offset points to the entity type keyword (e.g., "IFCWALL")
+                size_t entity_offset = token_stream_[2].startPos;
+
+                // Skip past the '(' token
+                lexer_->Next();
+
+                // Skip to semicolon without parsing attributes
+                skip_to_semicolon(lexer_);
+
+                // Update progress
+                if (((++progress_) % 1000) == 0) {
+                    std::stringstream ss;
+                    ss << "\r#" << current_id;
+                    Logger::Status(ss.str(), false);
+                }
+
+                // Create lazy storage with the file offset
+                return_value.emplace(
+                    (size_t)current_id,
+                    entity_type,
+                    IfcEntityInstanceData(lazy_spf_attribute_storage(entity_offset))
+                );
+            } else {
+                // Normal mode: fully parse the entity
+                parse_context ps;
+                lexer_->Next();
+                try {
+                    storage_.load(current_id, entity_type->as_entity(), ps, -1);
+                } catch (const IfcInvalidTokenException& e) {
+                    good_ = file_open_status::INVALID_SYNTAX;
+                    Logger::Error(e);
+                    break;
+                }
+
+                /// @todo Printing to stdout in a library class feels weird. Maybe move the progress prints to the client code?
+                // Update the status after every 1000 instances parsed
+                if (((++progress_) % 1000) == 0) {
+                    std::stringstream ss;
+                    ss << "\r#" << current_id;
+                    Logger::Status(ss.str(), false);
+                }
+
+                auto data = ps.construct(current_id, references_to_resolve_, entity_type, boost::none, -1, coerce_attribute_count);
+
+                return_value.emplace(
+                    (size_t)current_id,
+                    entity_type,
+                    std::move(data)
+                );
             }
-
-            /// @todo Printing to stdout in a library class feels weird. Maybe move the progress prints to the client code?
-            // Update the status after every 1000 instances parsed
-            if (((++progress_) % 1000) == 0) {
-                std::stringstream ss;
-                ss << "\r#" << current_id;
-                Logger::Status(ss.str(), false);
-            }
-
-            auto data = ps.construct(current_id, references_to_resolve_, entity_type, boost::none, -1, coerce_attribute_count);
-
-            return_value.emplace(
-                (size_t)current_id,
-                entity_type,
-                std::move(data)
-            );
         }
     advance:
         Token next_token;
