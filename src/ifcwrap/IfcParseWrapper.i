@@ -718,12 +718,12 @@ private:
 		return f;
 	}
 
-    IfcParse::IfcFile* read(const std::string& data) {
+    IfcParse::IfcFile* read(const std::string& data, bool lazy=false) {
 		char* copiedData = new char[data.length()];
 		memcpy(copiedData, data.c_str(), data.length());
 		IfcParse::IfcFile* f;
 		Py_BEGIN_ALLOW_THREADS;
-		f = new IfcParse::IfcFile((void *)copiedData, data.length());
+		f = new IfcParse::IfcFile((void *)copiedData, data.length(), lazy);
 		Py_END_ALLOW_THREADS;
 		return f;
 	}

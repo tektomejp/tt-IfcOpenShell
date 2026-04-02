@@ -1290,14 +1290,14 @@ IfcFile::IfcFile(std::istream& stream, int length)
     byguid_ = decltype(byguid_)(&std::get<impl::in_memory_file_storage>(storage_).byguid_);
 }
 
-IfcFile::IfcFile(void* data, int length)
+IfcFile::IfcFile(void* data, int length, bool lazy)
     : schema_(nullptr)
     , max_id_(0)
 {
 	FileReader s(std::string((char*)data, length), FileReader::caller_fed_tag{});
-    
+
     storage_.emplace<1>(this);
-    std::get<impl::in_memory_file_storage>(storage_).read_from_stream(&s, schema_, max_id_, types_to_bypass_loading_);
+    std::get<impl::in_memory_file_storage>(storage_).read_from_stream(&s, schema_, max_id_, types_to_bypass_loading_, lazy);
     good_ = std::get<impl::in_memory_file_storage>(storage_).good_;
     ifcroot_type_ = schema_ ? schema_->declaration_by_name("IfcRoot") : nullptr;
 

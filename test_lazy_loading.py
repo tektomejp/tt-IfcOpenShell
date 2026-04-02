@@ -31,11 +31,14 @@ Examples:
     PYTHONPATH=src/ifcopenshell-python .venv/bin/python test_lazy_loading.py \
         /home/ahmada/TestLargeIfcFiles/tt-speckleifc/samples/LARGEIFC_PLP_HolbornViaduct_MEP.ifc
 
-    # Test with any IFC file
-    PYTHONPATH=src/ifcopenshell-python .venv/bin/python test_lazy_loading.py /path/to/file.ifc
-
     # Lazy-only mode (skip normal baseline, useful for very large files)
     PYTHONPATH=src/ifcopenshell-python .venv/bin/python test_lazy_loading.py --lazy-only /path/to/file.ifc
+
+    # Load file into memory first (simulates blob storage / BytesIO scenario)
+    PYTHONPATH=src/ifcopenshell-python .venv/bin/python test_lazy_loading.py --from-memory /path/to/file.ifc
+
+    # Combine flags: lazy-only + from-memory
+    PYTHONPATH=src/ifcopenshell-python .venv/bin/python test_lazy_loading.py --lazy-only --from-memory /path/to/file.ifc
 
 IMPORTANT: Python version must match the compiled extension.
   The .so is named _ifcopenshell_wrapper.cpython-311-*.so — so you need Python 3.11.
@@ -63,9 +66,14 @@ def file_size_mb(path: str) -> float:
     return os.path.getsize(path) / (1024 * 1024)
 
 
-def run_test(ifc_path: str, lazy: bool) -> dict:
+def run_test(ifc_path: str, lazy: bool, from_memory: bool = False) -> dict:
     """
     Open an IFC file in normal or lazy mode and measure memory + timing.
+
+    If from_memory=True, reads the entire file into a Python bytes object first,
+    then loads via ifcopenshell.file.from_string(). This simulates the real-world
+    scenario of loading IFC data from blob storage / BytesIO.
+
     Returns a dict with all metrics.
     """
     import ifcopenshell
@@ -73,11 +81,38 @@ def run_test(ifc_path: str, lazy: bool) -> dict:
     gc.collect()
     baseline = mem_mb()
 
-    # Load
+    source_label = "memory" if from_memory else "disk"
+    ifc_data: bytes = b""
+
+    if from_memory:
+        # Read entire file into Python memory first
+        print(f"  Reading file into memory...", end=" ", flush=True)
+        t_read = time.time()
+        with open(ifc_path, "rb") as fh:
+            ifc_data = fh.read()
+        t_read = time.time() - t_read
+        mem_after_read = mem_mb()
+        print(f"{len(ifc_data) / (1024*1024):.1f} MB in {t_read:.2f}s (mem: +{mem_after_read - baseline:.1f} MB)")
+    else:
+        mem_after_read = baseline
+
+    # Load into ifcopenshell
     t0 = time.time()
-    f = ifcopenshell.open(ifc_path, lazy=lazy)
+    if from_memory:
+        # Decode bytes to str (IFC-SPF is ASCII text)
+        f = ifcopenshell.file.from_string(ifc_data.decode("latin-1"), lazy=lazy)
+    else:
+        f = ifcopenshell.open(ifc_path, lazy=lazy)
     t_load = time.time() - t0
     mem_after_load = mem_mb()
+
+    # Free the Python bytes buffer now that ifcopenshell has its own copy
+    if from_memory:
+        del ifc_data
+        gc.collect()
+        mem_after_free = mem_mb()
+    else:
+        mem_after_free = mem_after_load
 
     # Entity count (iteration only, no attribute access)
     t1 = time.time()
@@ -113,11 +148,16 @@ def run_test(ifc_path: str, lazy: bool) -> dict:
     mem_after_del = mem_mb()
 
     return {
-        "mode": "LAZY" if lazy else "NORMAL",
+        "mode": ("LAZY" if lazy else "NORMAL") + (" (from memory)" if from_memory else " (from disk)"),
         "schema": schema,
+        "source": source_label,
         "baseline": baseline,
+        "mem_after_read": mem_after_read,
+        "mem_delta_read": mem_after_read - baseline,
         "mem_after_load": mem_after_load,
         "mem_delta_load": mem_after_load - baseline,
+        "mem_after_free": mem_after_free,
+        "mem_delta_free": mem_after_free - baseline,
         "mem_after_walls": mem_after_walls,
         "mem_delta_walls": mem_after_walls - baseline,
         "mem_after_queries": mem_after_queries,
@@ -131,20 +171,20 @@ def run_test(ifc_path: str, lazy: bool) -> dict:
         "wall_count": wall_count,
         "first_wall_guid": first_wall_guid,
         "first_wall_name": first_wall_name,
-        "slab_count": len(slabs) if "slabs" in dir() else 0,
-        "column_count": len(columns) if "columns" in dir() else 0,
-        "beam_count": len(beams) if "beams" in dir() else 0,
-        "space_count": len(spaces) if "spaces" in dir() else 0,
     }
 
 
 def print_result(r: dict, file_mb: float):
     mode = r["mode"]
-    print(f"=== {mode} MODE ===")
+    print(f"=== {mode} ===")
     print(f"  Schema:          {r['schema']}")
+    if r["source"] == "memory":
+        print(f"  Mem for bytes:   +{r['mem_delta_read']:.1f} MB (file read into Python)")
     print(f"  Load time:       {r['t_load']:.2f}s")
     print(f"  Mem after load:  {r['mem_after_load']:.1f} MB (+{r['mem_delta_load']:.1f} MB)")
     print(f"  Mem/file ratio:  {r['mem_delta_load'] / file_mb:.1f}x file size")
+    if r["source"] == "memory":
+        print(f"  Mem after free:  {r['mem_after_free']:.1f} MB (+{r['mem_delta_free']:.1f} MB) (after del bytes)")
     print(f"  Entities:        {r['entity_count']:,}")
     print(f"  Count time:      {r['t_count']:.2f}s")
     print(f"  Walls:           {r['wall_count']} (query: {r['t_walls']:.3f}s)")
@@ -193,6 +233,12 @@ def main():
         action="store_true",
         help="Only run lazy mode (skip normal baseline). Useful for very large files.",
     )
+    parser.add_argument(
+        "--from-memory",
+        action="store_true",
+        help="Read file into Python bytes first, then load via from_string(). "
+             "Simulates loading IFC from blob storage / BytesIO.",
+    )
     args = parser.parse_args()
 
     ifc_path = os.path.abspath(args.ifc_file)
@@ -203,14 +249,18 @@ def main():
     file_mb = file_size_mb(ifc_path)
     print(f"File: {ifc_path}")
     print(f"Size: {file_mb:.1f} MB")
+    if args.from_memory:
+        print(f"Source: in-memory (file read into Python bytes first)")
+    else:
+        print(f"Source: disk")
     print()
 
     normal_result = None
     if not args.lazy_only:
-        normal_result = run_test(ifc_path, lazy=False)
+        normal_result = run_test(ifc_path, lazy=False, from_memory=args.from_memory)
         print_result(normal_result, file_mb)
 
-    lazy_result = run_test(ifc_path, lazy=True)
+    lazy_result = run_test(ifc_path, lazy=True, from_memory=args.from_memory)
     print_result(lazy_result, file_mb)
 
     if normal_result:

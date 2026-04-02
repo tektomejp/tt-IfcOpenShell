@@ -253,7 +253,7 @@ public:
     /// <summary>
 	/// Constructs an IfcFile object from a memory buffer containing IFC-SPF data.
     /// </summary>
-    IfcFile(void* data, int length);
+    IfcFile(void* data, int length, bool lazy=false);
 
     /// <summary>
     /// Constructs an IfcFile object from a given IFC SPF stream.
