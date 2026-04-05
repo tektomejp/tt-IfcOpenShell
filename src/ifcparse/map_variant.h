@@ -96,7 +96,20 @@ public:
         }
 
         bool operator==(const iterator& other) const {
-            return it_var == other.it_var;
+            if (it_var.index() != other.it_var.index()) {
+                return false;
+            }
+
+            return std::visit([](const auto& lhs, const auto& rhs) {
+                using lhs_t = std::decay_t<decltype(lhs)>;
+                using rhs_t = std::decay_t<decltype(rhs)>;
+
+                if constexpr (std::is_same_v<lhs_t, rhs_t>) {
+                    return lhs == rhs;
+                } else {
+                    return false;
+                }
+            }, it_var, other.it_var);
         }
 
         bool operator!=(const iterator& other) const {

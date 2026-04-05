@@ -168,8 +168,10 @@ public:
                 return true;
             if (it_ && other.it_)
                 return it_->key().ToString() == other.it_->key().ToString();
-#endif
             return false;
+#else
+            return !it_ && !other.it_;
+#endif
         }
 
         bool operator!=(const iterator& other) const {

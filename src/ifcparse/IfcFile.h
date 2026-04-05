@@ -100,9 +100,16 @@ private:
     int yielded_header_instances_ = 0;
     std::vector<const declaration*> types_to_bypass_;
     std::vector<unsigned> bypassed_instances_;
+    bool lazy_loading_ = false;  // When true, store file offset instead of parsing attributes
 
   public:
 	bool coerce_attribute_count = true;
+
+    /// Enable or disable lazy loading mode.
+    /// When enabled, entity attributes are not parsed during readInstance().
+    /// Instead, only the file offset is recorded and attributes are parsed on first access.
+    void setLazyLoading(bool enable) { lazy_loading_ = enable; }
+    bool isLazyLoading() const { return lazy_loading_; }
 
     operator bool() const {
         return good_ && !lexer_->stream->eof();
@@ -236,7 +243,7 @@ public:
     /// <param name="path">UTF-8 file path to an IFC-SPF file or RocksDB database directory</param>
     /// <param name="ty">File type of the path</param>
     /// <param name="readonly">Whether to open in read-only mode, only supported on RocksDB databases</param>
-    IfcFile(const std::string& path, filetype ty=FT_AUTODETECT, bool readonly=false);
+    IfcFile(const std::string& path, filetype ty=FT_AUTODETECT, bool readonly=false, bool lazy=false);
 
     /// <summary>
 	/// Constructs an IfcFile object from a stream containing IFC-SPF data.
@@ -246,7 +253,7 @@ public:
     /// <summary>
 	/// Constructs an IfcFile object from a memory buffer containing IFC-SPF data.
     /// </summary>
-    IfcFile(void* data, int length);
+    IfcFile(void* data, int length, bool lazy=false);
 
     /// <summary>
     /// Constructs an IfcFile object from a given IFC SPF stream.
@@ -268,7 +275,7 @@ public:
     /// </summary>
     IfcFile(const uninitialized_tag&);
 
-    bool initialize(const std::string& path, filetype ty = FT_AUTODETECT, bool readonly = false);
+    bool initialize(const std::string& path, filetype ty = FT_AUTODETECT, bool readonly = false, bool lazy = false);
 #ifdef USE_MMAP
     bool initialize(const std::string& path, bool mmap);
 #endif
@@ -439,6 +446,12 @@ public:
     void unbatch();
 
     void reset_identity_cache();
+
+    /// Resolve pending lazy entity references.  Call after materializing
+    /// lazy entities (e.g. after iterating all entities and accessing an
+    /// attribute) to fix up cross-entity references that were deferred
+    /// during materialization.
+    void resolve_lazy_refs();
 };
 
 #ifdef WITH_IFCXML

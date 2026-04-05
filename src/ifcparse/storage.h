@@ -29,6 +29,7 @@ namespace rocksdb {
 #include <iostream>
 #include <vector>
 #include <list>
+#include <memory>
 
 #ifndef SWIG
 
@@ -184,7 +185,7 @@ namespace IfcParse {
 
         void push(IfcUtil::IfcBaseClass* inst);
 
-        IfcEntityInstanceData construct(boost::optional<size_t> name, unresolved_references& references_to_resolve, const IfcParse::declaration* decl, boost::optional<size_t> expected_size, int resolve_reference_index, bool coerce_attribute_count=true);
+        IfcEntityInstanceData construct(boost::optional<size_t> name, unresolved_references& references_to_resolve, const IfcParse::declaration* decl, boost::optional<size_t> expected_size, int resolve_reference_index, bool coerce_attribute_count=true, const boost::unordered_map<uint32_t, IfcUtil::IfcBaseClass*>* byid = nullptr);
     };
 
     namespace impl {
@@ -195,7 +196,7 @@ namespace IfcParse {
             }
 
             IfcParse::IfcSpfLexer* tokens;
-            // IfcParse::FileReader* stream;
+            std::unique_ptr<IfcParse::FileReader> owned_stream_;  // kept alive for lazy mode
 
             // Either one of these needs to be set
             IfcParse::IfcFile* file;
@@ -216,7 +217,27 @@ namespace IfcParse {
             typedef std::map<inverse_attr_record, std::vector<uint32_t>> entities_by_ref_t;
             typedef entity_instance_by_name_t::iterator iterator;
 
+            // Deferred reference resolution for lazy-loaded entities.
+            // Key: entity instance ID. Value: (file_offset, unresolved references).
+            // The file offset is saved so that resolve_pending_lazy_refs() can re-parse
+            // the entity from scratch with byid_, avoiding the heap-corrupting
+            // Blank-to-shared_ptr set() transition.
+            std::map<size_t, std::pair<size_t, unresolved_references>> pending_lazy_refs_;
+
+            // True after read_from_stream completes and all entities are in byid_.
+            // When true, materialize() resolves references inline instead of deferring.
+            bool loading_complete_ = false;
+
+            /// Resolve all pending lazy entity references using byid_.
+            /// Call after all entities are loaded (i.e. at the end of read_from_stream).
+            void resolve_pending_lazy_refs();
+
+            /// Resolve references for a single entity's storage. Used by materialize()
+            /// when loading is already complete (all entities in byid_).
+            void resolve_refs_for_entity(in_memory_attribute_storage* storage, const unresolved_references& refs);
+
             in_memory_file_storage(IfcParse::IfcFile* f = nullptr) : tokens(nullptr), file(f), schema(nullptr) {}
+            ~in_memory_file_storage();
             in_memory_file_storage(const in_memory_file_storage&) = delete;
             in_memory_file_storage(const in_memory_file_storage&&) = delete;
 
@@ -268,7 +289,7 @@ namespace IfcParse {
 
             // @todo is this still used
             IfcEntityInstanceData read(unsigned int index);
-            void read_from_stream(IfcParse::FileReader* stream, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass);
+            void read_from_stream(IfcParse::FileReader* stream, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass, bool lazy = false);
 
             file_open_status good_ = file_open_status::SUCCESS;
 

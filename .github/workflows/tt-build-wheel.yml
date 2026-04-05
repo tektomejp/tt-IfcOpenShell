@@ -1,0 +1,213 @@
+name: Build Python Wheel and Create Release
+
+# Triggers on version tags pushed to tt-dev branch only.
+# Tag format: vX.Y.Z (e.g., v0.8.5, v0.8.5.1)
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Version to embed in the wheel (e.g. 0.8.5). Leave empty to use tag."
+        required: false
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ -n "${{ github.event.inputs.version_override }}" ]]; then
+              VERSION="${{ github.event.inputs.version_override }}"
+            else
+              TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+              VERSION=${TAG#v}
+            fi
+            echo "Manual run, version: $VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+            echo "is_tag_push=false" >> $GITHUB_OUTPUT
+          else
+            TAG=${GITHUB_REF#refs/tags/}
+            VERSION=${TAG#v}
+            echo "Tag push: $TAG -> version $VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "is_tag_push=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate tag format
+        if: github.event_name == 'push'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.?[0-9]*$ ]]; then
+            echo "::error::Tag format invalid. Expected vX.Y.Z or vX.Y.Z.N, got: $TAG"
+            exit 1
+          fi
+          echo "Tag format valid: $TAG"
+
+      - name: Check version is monotonically increasing
+        if: github.event_name == 'push'
+        run: |
+          CURRENT_TAG="${{ steps.version.outputs.tag }}"
+          CURRENT_VERSION="${{ steps.version.outputs.version }}"
+
+          # Get all matching tags sorted by version, excluding current
+          PREVIOUS_TAG=$(git tag -l 'v[0-9]*' | grep -v "^${CURRENT_TAG}$" | sort -V | tail -n 1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous version tags found. First release!"
+            exit 0
+          fi
+
+          PREVIOUS_VERSION=${PREVIOUS_TAG#v}
+          echo "Current:  $CURRENT_VERSION"
+          echo "Previous: $PREVIOUS_VERSION"
+
+          HIGHER=$(printf '%s\n%s' "$CURRENT_VERSION" "$PREVIOUS_VERSION" | sort -V | tail -n 1)
+          if [ "$HIGHER" != "$CURRENT_VERSION" ]; then
+            echo "::error::Version $CURRENT_VERSION is not greater than existing $PREVIOUS_VERSION"
+            exit 1
+          fi
+
+          echo "Version check passed: $CURRENT_VERSION > $PREVIOUS_VERSION"
+
+  build-wheel:
+    needs: validate-tag
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.validate-tag.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: build
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        shell: bash -el {0}
+        run: |
+          conda install -y -c conda-forge \
+            cmake ninja swig \
+            boost-cpp libboost-devel \
+            occt cgal-cpp \
+            eigen gmp mpfr \
+            libxml2 nlohmann_json zlib \
+            python=3.12 numpy setuptools
+
+      - name: Configure CMake
+        shell: bash -el {0}
+        run: |
+          mkdir build && cd build
+          cmake ../cmake \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_IFCPYTHON=ON \
+            -DBUILD_IFCGEOM=ON \
+            -DBUILD_CONVERT=OFF \
+            -DBUILD_GEOMSERVER=OFF \
+            -DWITH_OPENCASCADE=ON \
+            -DWITH_CGAL=ON \
+            -DGLTF_SUPPORT=OFF \
+            -DHDF5_SUPPORT=OFF \
+            -DIFCXML_SUPPORT=ON \
+            "-DSCHEMA_VERSIONS=2x3;4;4x3_add2"
+
+      - name: Build C++ library
+        shell: bash -el {0}
+        run: |
+          cd build
+          ninja -j$(( $(nproc) / 2 + 1 ))
+
+      - name: Assemble wheel
+        shell: bash -el {0}
+        run: |
+          # Copy built artifacts into the Python package
+          PYDIR=src/ifcopenshell-python/ifcopenshell
+          cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
+          cp build/ifcwrap/ifcopenshell_wrapper.py "$PYDIR/"
+
+          # Set version in pyproject.toml
+          cd src/ifcopenshell-python
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+
+          # Build wheel
+          pip install build
+          python -m build --wheel
+
+          # Rename to correct platform tag
+          cd dist
+          for f in *.whl; do
+            NEWNAME=$(echo "$f" | sed 's/none-any/cp312-cp312-linux_x86_64/')
+            mv "$f" "$NEWNAME"
+          done
+
+          echo "Built wheels:"
+          ls -lh *.whl
+
+      - name: Verify wheel installs
+        shell: bash -el {0}
+        run: |
+          pip install src/ifcopenshell-python/dist/*.whl
+          python -c "
+          import ifcopenshell
+          print(f'ifcopenshell version: {ifcopenshell.version}')
+          print(f'Schema: {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
+          # Quick smoke test
+          f = ifcopenshell.file(schema='IFC4')
+          f.createIfcProject('test')
+          print('Smoke test passed')
+          "
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ifcopenshell-wheel
+          path: src/ifcopenshell-python/dist/*.whl
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: src/ifcopenshell-python/dist/*.whl
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## ifcopenshell ${{ env.VERSION }} (tt-IfcOpenShell fork)
+
+            Built from `tt-dev` branch with lazy loading support.
+
+            ### Install
+            ```bash
+            pip install ifcopenshell --force-reinstall \
+              --index-url https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/
+            ```
+            Or directly:
+            ```bash
+            pip install "$(gh release view ${{ needs.validate-tag.outputs.tag }} --repo tektomejp/tt-IfcOpenShell --json assets -q '.assets[0].url')"
+            ```
+
+            ### Platform
+            - Linux x86_64
+            - Python 3.12
+          token: ${{ secrets.GITHUB_TOKEN }}

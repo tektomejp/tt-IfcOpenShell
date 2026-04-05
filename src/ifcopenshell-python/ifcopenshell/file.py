@@ -1041,8 +1041,8 @@ class file:
         return
 
     @staticmethod
-    def from_string(s: str) -> file:
-        return file(ifcopenshell_wrapper.read(s))
+    def from_string(s: str, lazy: bool = False) -> file:
+        return file(ifcopenshell_wrapper.read(s, lazy=lazy))
 
     @staticmethod
     def from_pointer(address: int) -> file:

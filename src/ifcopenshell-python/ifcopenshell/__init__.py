@@ -146,6 +146,7 @@ def open(
     readonly: bool = False,
     mmap: bool = False,
     bypass_types: Optional[Sequence[str]] = None,
+    lazy: bool = False,
 ) -> Union[_file, sqlite, _stream]:
     """Loads an IFC dataset from a filepath
 
@@ -206,6 +207,8 @@ def open(
     elif mmap:
         # mmap parameter is only available for builds with USE_MMAP, not used in our main builds
         f = ifcopenshell_wrapper.open(str(path.absolute()), mmap=mmap)  # type: ignore[unknown-argument]
+    elif lazy:
+        f = ifcopenshell_wrapper.open(str(path.absolute()), lazy=lazy)
     else:
         f = ifcopenshell_wrapper.open(str(path.absolute()))
     return file(f)

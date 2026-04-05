@@ -25,6 +25,7 @@
 #include "../ifcgeom/taxonomy.h"
 
 #include <memory>
+#include <type_traits>
 #include <vector>
 #include <unordered_map>
 
@@ -200,11 +201,23 @@ namespace IfcGeom {
 			}
 		}
 	public:
-		template <typename... Args>
-		OpaqueCoordinate(Args... args) {
-			static_assert(sizeof...(args) == N, "Incorrect number of arguments provided");
+#ifndef SWIG
+		template <
+			typename... Args,
+			typename = std::enable_if_t<
+				sizeof...(Args) == N &&
+				std::conjunction_v<std::is_convertible<Args, OpaqueNumber*>...>
+			>
+		>
+		explicit OpaqueCoordinate(Args... args) {
 			init_<0>(args...);
 		}
+#else
+		template <typename... Args>
+		OpaqueCoordinate(Args... args) {
+			init_<0>(args...);
+		}
+#endif
 
 		OpaqueCoordinate() {
 			for (auto it = values.begin(); it != values.end(); ++it) {
