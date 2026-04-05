@@ -126,6 +126,7 @@ jobs:
             -DBUILD_GEOMSERVER=OFF \
             -DWITH_OPENCASCADE=ON \
             -DWITH_CGAL=ON \
+            -DCOLLADA_SUPPORT=OFF \
             -DGLTF_SUPPORT=OFF \
             -DHDF5_SUPPORT=OFF \
             -DIFCXML_SUPPORT=ON \
