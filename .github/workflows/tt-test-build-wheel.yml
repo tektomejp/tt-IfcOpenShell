@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to stamp in the wheel (default: 0.0.0-test)"
+        description: "Version to stamp in the wheel (default: 0.0.0.dev1)"
         required: false
         default: "0.0.0.dev1"
 
@@ -39,7 +39,7 @@ jobs:
         shell: bash -el {0}
         run: |
           conda install -y -c conda-forge \
-            cmake ninja swig \
+            cmake ninja swig patchelf \
             boost-cpp libboost-devel \
             occt cgal-cpp \
             eigen gmp mpfr \
@@ -76,30 +76,45 @@ jobs:
         run: |
           PYDIR=src/ifcopenshell-python/ifcopenshell
           DISTDIR=src/ifcopenshell-python/dist
+          REPAIRED=src/ifcopenshell-python/repaired
 
+          # Copy built .so and wrapper into the Python package tree
           cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
           cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
 
+          # Stamp version
           sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' src/ifcopenshell-python/pyproject.toml
 
-          pip install build wheel
+          # Build a pure-Python wheel, then retag so auditwheel sees it as
+          # a platform wheel (it refuses to repair "none-any" wheels).
+          pip install build auditwheel wheel
           python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
-
-          wheel tags \
-            --remove \
-            --python-tag=cp312 \
-            --abi-tag=cp312 \
-            --platform-tag=linux_x86_64 \
+          wheel tags --remove \
+            --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 \
             "$DISTDIR"/*.whl
 
+          # Bundle all shared libs (OCCT, GMP, MPFR, libxml2, etc.) into the
+          # wheel.  auditwheel auto-detects the manylinux tag from glibc symbols.
+          LD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
+            auditwheel repair "$DISTDIR"/*.whl \
+              -w "$REPAIRED"
+
+          # Retag to linux_x86_64 so pip accepts the wheel regardless of the
+          # host glibc version.  The bundled libs and patched RPATHs from
+          # auditwheel are preserved — only the tag in the filename/metadata
+          # changes.
+          wheel tags --remove \
+            --platform-tag=linux_x86_64 \
+            "$REPAIRED"/*.whl
+
           echo "Final wheel:"
-          ls -lh "$DISTDIR"/*.whl
+          ls -lh "$REPAIRED"/*.whl
 
       - name: Verify wheel installs and works
         shell: bash -el {0}
         run: |
-          WHEEL_NAME="ifcopenshell-${VERSION}-cp312-cp312-linux_x86_64.whl"
-          pip install "src/ifcopenshell-python/dist/${WHEEL_NAME}"
+          # Install from repaired dir (only one .whl there)
+          pip install src/ifcopenshell-python/repaired/*.whl
           python -c "
           import ifcopenshell
           print(f'version : {ifcopenshell.version}')

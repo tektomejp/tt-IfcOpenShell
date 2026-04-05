@@ -62,7 +62,6 @@ jobs:
           CURRENT_VERSION="${{ steps.version.outputs.version }}"
 
           # Only compare against tags that match our strict vX.Y.Z[.N] format.
-          # This excludes upstream tags like v0.7.0-alpha0 or v0.7.0-validation.
           PREVIOUS_TAG=$(
             git tag -l 'v*' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.?[0-9]*$' \
@@ -93,7 +92,6 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate-tag.outputs.version }}
-      WHEEL_NAME: ifcopenshell-${{ needs.validate-tag.outputs.version }}-cp312-cp312-linux_x86_64.whl
 
     steps:
       - name: Checkout code
@@ -112,7 +110,7 @@ jobs:
         shell: bash -el {0}
         run: |
           conda install -y -c conda-forge \
-            cmake ninja swig \
+            cmake ninja swig patchelf \
             boost-cpp libboost-devel \
             occt cgal-cpp \
             eigen gmp mpfr \
@@ -149,34 +147,43 @@ jobs:
         run: |
           PYDIR=src/ifcopenshell-python/ifcopenshell
           DISTDIR=src/ifcopenshell-python/dist
+          REPAIRED=src/ifcopenshell-python/repaired
 
           # Copy built .so and wrapper into the Python package tree
           cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
           cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
 
-          # Stamp the version into pyproject.toml (replaces the 0.0.0 placeholder)
+          # Stamp version
           sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' src/ifcopenshell-python/pyproject.toml
 
-          # Build a pure-Python wheel (tags: py3-none-any)
-          pip install build wheel
+          # Build a pure-Python wheel, then retag so auditwheel sees it as
+          # a platform wheel (it refuses to repair "none-any" wheels).
+          pip install build auditwheel wheel
           python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
-
-          # Retag to platform-specific (cp312-cp312-linux_x86_64) and remove
-          # the original pure wheel so only one .whl remains in dist/.
-          wheel tags \
-            --remove \
-            --python-tag=cp312 \
-            --abi-tag=cp312 \
-            --platform-tag=linux_x86_64 \
+          wheel tags --remove \
+            --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 \
             "$DISTDIR"/*.whl
 
+          # Bundle all shared libs (OCCT, GMP, MPFR, libxml2, etc.) into the
+          # wheel.  auditwheel auto-detects the manylinux tag from glibc symbols.
+          LD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
+            auditwheel repair "$DISTDIR"/*.whl \
+              -w "$REPAIRED"
+
+          # Retag to linux_x86_64 so pip accepts the wheel regardless of the
+          # host glibc version.  The bundled libs and patched RPATHs from
+          # auditwheel are preserved.
+          wheel tags --remove \
+            --platform-tag=linux_x86_64 \
+            "$REPAIRED"/*.whl
+
           echo "Final wheel:"
-          ls -lh "$DISTDIR"/*.whl
+          ls -lh "$REPAIRED"/*.whl
 
       - name: Verify wheel installs and works
         shell: bash -el {0}
         run: |
-          pip install "src/ifcopenshell-python/dist/${WHEEL_NAME}"
+          pip install src/ifcopenshell-python/repaired/*.whl
           python -c "
           import ifcopenshell
           print(f'version : {ifcopenshell.version}')
@@ -190,27 +197,29 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ifcopenshell-wheel
-          path: src/ifcopenshell-python/dist/${{ env.WHEEL_NAME }}
+          path: src/ifcopenshell-python/repaired/*.whl
           retention-days: 90
 
       - name: Create GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: src/ifcopenshell-python/dist/${{ env.WHEEL_NAME }}
+          files: src/ifcopenshell-python/repaired/*.whl
           generate_release_notes: true
           draft: false
           prerelease: false
           body: |
             ## ifcopenshell ${{ env.VERSION }} (tt-IfcOpenShell fork)
 
+            Self-contained wheel with bundled OCCT, CGAL dependencies.
             Built from commit ${{ github.sha }} with lazy loading support.
 
             ### Install
             ```
-            pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/${{ env.WHEEL_NAME }}
+            pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/ifcopenshell-${{ env.VERSION }}-cp312-cp312-linux_x86_64.whl
             ```
 
             ### Platform
             - Linux x86_64, Python 3.12
+            - Self-contained: OCCT, GMP, MPFR, libxml2 bundled inside
           token: ${{ secrets.GITHUB_TOKEN }}
