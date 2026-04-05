@@ -365,7 +365,8 @@ CLASH_TYPE_ITEMS = ("protrusion", "pierce", "collision", "clearance")
 # when the C++ build includes BVH/spatial query support. Guard it so that
 # builds without it (e.g. minimal geometry-only builds) can still use
 # iterator/settings.
-if hasattr(ifcopenshell_wrapper, 'tree'):
+if hasattr(ifcopenshell_wrapper, "tree"):
+
     class tree(ifcopenshell_wrapper.tree):
         def __init__(self, file: Optional[file] = None, settings: Optional[settings] = None):
             args = [self]
@@ -639,9 +640,9 @@ def make_shape_function(fn):
     return _
 
 
-if hasattr(ifcopenshell_wrapper, 'serialise'):
+if hasattr(ifcopenshell_wrapper, "serialise"):
     serialise = make_shape_function(ifcopenshell_wrapper.serialise)
-if hasattr(ifcopenshell_wrapper, 'tesselate'):
+if hasattr(ifcopenshell_wrapper, "tesselate"):
     tesselate = make_shape_function(ifcopenshell_wrapper.tesselate)
 
 
@@ -675,7 +676,7 @@ class serializers:
 
     # Hdf- Xml- and glTF- serializers don't support writing to a buffer, only to filename
     # so no wrap_buffer_creation() for these serializers
-    if hasattr(ifcopenshell_wrapper, 'XmlSerializer'):
+    if hasattr(ifcopenshell_wrapper, "XmlSerializer"):
         xml = ifcopenshell_wrapper.XmlSerializer
     buffer = ifcopenshell_wrapper.buffer
     # gltf, hdf5, collada and json availability depend on IfcOpenShell configuration settings
