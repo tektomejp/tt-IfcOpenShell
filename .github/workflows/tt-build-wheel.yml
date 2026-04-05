@@ -150,16 +150,15 @@ jobs:
           cd src/ifcopenshell-python
           sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
 
-          # Build wheel
-          pip install build
+          # Build wheel then retag with correct platform tags.
+          # python -m build produces a pure "py3-none-any" wheel, but we
+          # ship a platform-specific .so inside it.
+          pip install build wheel
           python -m build --wheel
 
-          # Rename to correct platform tag
+          # Retag: py3-none-any → cp312-cp312-linux_x86_64
           cd dist
-          for f in *.whl; do
-            NEWNAME=$(echo "$f" | sed 's/none-any/cp312-cp312-linux_x86_64/')
-            mv "$f" "$NEWNAME"
-          done
+          python -m wheel tags --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 *.whl
 
           echo "Built wheels:"
           ls -lh *.whl
