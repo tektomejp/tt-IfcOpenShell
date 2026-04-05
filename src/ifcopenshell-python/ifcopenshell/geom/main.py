@@ -361,99 +361,104 @@ ClashType = Literal["protrusion", "pierce", "collision", "clearance"]
 CLASH_TYPE_ITEMS = ("protrusion", "pierce", "collision", "clearance")
 
 
-class tree(ifcopenshell_wrapper.tree):
-    def __init__(self, file: Optional[file] = None, settings: Optional[settings] = None):
-        args = [self]
-        if file is not None:
-            args.append(file.wrapped_data)
-            if settings is not None:
-                args.append(settings)
-        ifcopenshell_wrapper.tree.__init__(*args)
+# The tree class requires ifcopenshell_wrapper.tree which is only available
+# when the C++ build includes BVH/spatial query support. Guard it so that
+# builds without it (e.g. minimal geometry-only builds) can still use
+# iterator/settings.
+if hasattr(ifcopenshell_wrapper, 'tree'):
+    class tree(ifcopenshell_wrapper.tree):
+        def __init__(self, file: Optional[file] = None, settings: Optional[settings] = None):
+            args = [self]
+            if file is not None:
+                args.append(file.wrapped_data)
+                if settings is not None:
+                    args.append(settings)
+            ifcopenshell_wrapper.tree.__init__(*args)
 
-    def add_file(self, file: file, settings: settings) -> None:
-        ifcopenshell_wrapper.tree.add_file(self, file.wrapped_data, settings)
+        def add_file(self, file: file, settings: settings) -> None:
+            ifcopenshell_wrapper.tree.add_file(self, file.wrapped_data, settings)
 
-    def add_iterator(self, iterator: iterator) -> None:
-        ifcopenshell_wrapper.tree.add_file(self, iterator)
+        def add_iterator(self, iterator: iterator) -> None:
+            ifcopenshell_wrapper.tree.add_file(self, iterator)
 
-    def select(
-        self,
-        value: Union[
-            entity_instance, ifcopenshell_wrapper.BRepElement, tuple[float, float, float], TopoDS.TopoDS_Shape
-        ],
-        **kwargs,
-    ) -> list[entity_instance]:
-        def unwrap(value):
-            if isinstance(value, entity_instance):
-                return value.wrapped_data
-            elif all(map(lambda v: hasattr(value, v), "XYZ")):
-                return value.X(), value.Y(), value.Z()
-            return value
+        def select(
+            self,
+            value: Union[
+                entity_instance, ifcopenshell_wrapper.BRepElement, tuple[float, float, float], TopoDS.TopoDS_Shape
+            ],
+            **kwargs,
+        ) -> list[entity_instance]:
+            def unwrap(value):
+                if isinstance(value, entity_instance):
+                    return value.wrapped_data
+                elif all(map(lambda v: hasattr(value, v), "XYZ")):
+                    return value.X(), value.Y(), value.Z()
+                return value
 
-        args = [self, unwrap(value)]
-        if isinstance(value, (entity_instance, ifcopenshell_wrapper.BRepElement)):
-            args.append(kwargs.get("completely_within", False))
-            if "extend" in kwargs:
-                args.append(kwargs["extend"])
-        elif isinstance(value, (list, tuple)) and len(value) == 3 and set(map(type, value)) == {float}:
-            if "extend" in kwargs:
-                args.append(kwargs["extend"])
-        elif has_occ:
-            if isinstance(value, TopoDS.TopoDS_Shape):
-                args[1] = utils.serialize_shape(value)
+            args = [self, unwrap(value)]
+            if isinstance(value, (entity_instance, ifcopenshell_wrapper.BRepElement)):
                 args.append(kwargs.get("completely_within", False))
                 if "extend" in kwargs:
                     args.append(kwargs["extend"])
-        return [entity_instance(e) for e in ifcopenshell_wrapper.tree.select(*args)]
+            elif isinstance(value, (list, tuple)) and len(value) == 3 and set(map(type, value)) == {float}:
+                if "extend" in kwargs:
+                    args.append(kwargs["extend"])
+            elif has_occ:
+                if isinstance(value, TopoDS.TopoDS_Shape):
+                    args[1] = utils.serialize_shape(value)
+                    args.append(kwargs.get("completely_within", False))
+                    if "extend" in kwargs:
+                        args.append(kwargs["extend"])
+            return [entity_instance(e) for e in ifcopenshell_wrapper.tree.select(*args)]
 
-    def select_box(self, value, **kwargs) -> list[entity_instance]:
-        def unwrap(value):
-            if isinstance(value, entity_instance):
-                return value.wrapped_data
-            elif hasattr(value, "Get"):
-                return value.Get()[:3], value.Get()[3:]
-            return value
+        def select_box(self, value, **kwargs) -> list[entity_instance]:
+            def unwrap(value):
+                if isinstance(value, entity_instance):
+                    return value.wrapped_data
+                elif hasattr(value, "Get"):
+                    return value.Get()[:3], value.Get()[3:]
+                return value
 
-        args = [self, unwrap(value)]
-        if "extend" in kwargs or "completely_within" in kwargs:
-            args.append(kwargs.get("completely_within", False))
-        if "extend" in kwargs:
-            args.append(kwargs.get("extend", -1.0e-5))
-        return [entity_instance(e) for e in ifcopenshell_wrapper.tree.select_box(*args)]
+            args = [self, unwrap(value)]
+            if "extend" in kwargs or "completely_within" in kwargs:
+                args.append(kwargs.get("completely_within", False))
+            if "extend" in kwargs:
+                args.append(kwargs.get("extend", -1.0e-5))
+            return [entity_instance(e) for e in ifcopenshell_wrapper.tree.select_box(*args)]
 
-    def clash_intersection_many(
-        self,
-        set_a: Iterable[entity_instance],
-        set_b: Iterable[entity_instance],
-        tolerance: float = 0.002,
-        check_all: bool = True,
-    ) -> tuple[ifcopenshell_wrapper.clash, ...]:
-        args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], tolerance, check_all]
-        return ifcopenshell_wrapper.tree.clash_intersection_many(*args)
+        def clash_intersection_many(
+            self,
+            set_a: Iterable[entity_instance],
+            set_b: Iterable[entity_instance],
+            tolerance: float = 0.002,
+            check_all: bool = True,
+        ) -> tuple[ifcopenshell_wrapper.clash, ...]:
+            args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], tolerance, check_all]
+            return ifcopenshell_wrapper.tree.clash_intersection_many(*args)
 
-    def clash_collision_many(
-        self, set_a: Iterable[entity_instance], set_b: Iterable[entity_instance], allow_touching=False
-    ) -> tuple[ifcopenshell_wrapper.clash, ...]:
-        args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], allow_touching]
-        return ifcopenshell_wrapper.tree.clash_collision_many(*args)
+        def clash_collision_many(
+            self, set_a: Iterable[entity_instance], set_b: Iterable[entity_instance], allow_touching=False
+        ) -> tuple[ifcopenshell_wrapper.clash, ...]:
+            args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], allow_touching]
+            return ifcopenshell_wrapper.tree.clash_collision_many(*args)
 
-    def clash_clearance_many(
-        self,
-        set_a: Iterable[entity_instance],
-        set_b: Iterable[entity_instance],
-        clearance: float = 0.05,
-        check_all: bool = False,
-    ) -> tuple[ifcopenshell_wrapper.clash, ...]:
-        args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], clearance, check_all]
-        return ifcopenshell_wrapper.tree.clash_clearance_many(*args)
+        def clash_clearance_many(
+            self,
+            set_a: Iterable[entity_instance],
+            set_b: Iterable[entity_instance],
+            clearance: float = 0.05,
+            check_all: bool = False,
+        ) -> tuple[ifcopenshell_wrapper.clash, ...]:
+            args = [self, [e.wrapped_data for e in set_a], [e.wrapped_data for e in set_b], clearance, check_all]
+            return ifcopenshell_wrapper.tree.clash_clearance_many(*args)
 
-    @staticmethod
-    def get_clash_type(clash_type_i: int) -> ClashType:
-        """Convert clash type index to a readable string format.
+        @staticmethod
+        def get_clash_type(clash_type_i: int) -> ClashType:
+            """Convert clash type index to a readable string format.
 
-        :param clash_type_i: Type index that comes from ``clash.clash_type``.
-        """
-        return CLASH_TYPE_ITEMS[clash_type_i]
+            :param clash_type_i: Type index that comes from ``clash.clash_type``.
+            """
+            return CLASH_TYPE_ITEMS[clash_type_i]
 
 
 def create_shape(
@@ -634,11 +639,13 @@ def make_shape_function(fn):
     return _
 
 
-serialise = make_shape_function(ifcopenshell_wrapper.serialise)
-tesselate = make_shape_function(ifcopenshell_wrapper.tesselate)
+if hasattr(ifcopenshell_wrapper, 'serialise'):
+    serialise = make_shape_function(ifcopenshell_wrapper.serialise)
+if hasattr(ifcopenshell_wrapper, 'tesselate'):
+    tesselate = make_shape_function(ifcopenshell_wrapper.tesselate)
 
 
-def transform_string(v: Union[str, serializers.buffer]) -> serializers.buffer:
+def transform_string(v):
     if isinstance(v, str):
         return ifcopenshell_wrapper.buffer(v)
     return v
@@ -668,7 +675,8 @@ class serializers:
 
     # Hdf- Xml- and glTF- serializers don't support writing to a buffer, only to filename
     # so no wrap_buffer_creation() for these serializers
-    xml = ifcopenshell_wrapper.XmlSerializer
+    if hasattr(ifcopenshell_wrapper, 'XmlSerializer'):
+        xml = ifcopenshell_wrapper.XmlSerializer
     buffer = ifcopenshell_wrapper.buffer
     # gltf, hdf5, collada and json availability depend on IfcOpenShell configuration settings
     try:

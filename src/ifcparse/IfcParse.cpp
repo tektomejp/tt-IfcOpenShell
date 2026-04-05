@@ -1505,6 +1505,113 @@ IfcParse::impl::in_memory_file_storage::~in_memory_file_storage() {
     }
 }
 
+static int _lazy_agg_limit = -1; // -1 = unlimited, set from env LAZY_AGG_LIMIT
+static int _lazy_agg_count = 0;
+
+void IfcParse::impl::in_memory_file_storage::resolve_refs_for_entity(in_memory_attribute_storage* entity_storage, const unresolved_references& refs) {
+    if (_lazy_agg_limit == -1) {
+        const char* env = getenv("LAZY_AGG_LIMIT");
+        _lazy_agg_limit = env ? atoi(env) : 999999999;
+    }
+
+    for (const auto& p : refs) {
+        auto attr_index = p.first.index_;
+        if (attr_index >= entity_storage->size()) {
+            continue;
+        }
+        if (auto* v = std::get_if<reference_or_simple_type>(&p.second)) {
+            if (auto* ref = std::get_if<InstanceReference>(v)) {
+                if (!entity_storage->has<Blank>(attr_index)) {
+                    continue;
+                }
+                auto it = byid_.find(*ref);
+                if (it != byid_.end()) {
+                    entity_storage->set(attr_index, it->second);
+                }
+            } else if (auto* inst = std::get_if<IfcUtil::IfcBaseClass*>(v)) {
+                if (entity_storage->has<Blank>(attr_index)) {
+                    entity_storage->set(attr_index, *inst);
+                }
+            }
+        } else if (auto* vv = std::get_if<std::vector<reference_or_simple_type>>(&p.second)) {
+            if (_lazy_agg_count >= _lazy_agg_limit) {
+                continue;
+            }
+            if (!entity_storage->has<Blank>(attr_index)) {
+                continue;
+            }
+            aggregate_of_instance::ptr agg(new aggregate_of_instance);
+            for (const auto& vi : *vv) {
+                if (auto* ref = std::get_if<InstanceReference>(&vi)) {
+                    auto it = byid_.find(*ref);
+                    if (it != byid_.end()) {
+                        agg->push(it->second);
+                    }
+                } else if (auto* inst = std::get_if<IfcUtil::IfcBaseClass*>(&vi)) {
+                    agg->push(*inst);
+                }
+            }
+            if (agg->size() > 0) {
+                entity_storage->set(attr_index, agg);
+                _lazy_agg_count++;
+            }
+        }
+    }
+}
+
+void IfcParse::impl::in_memory_file_storage::resolve_pending_lazy_refs() {
+    // Re-parse each entity from its saved file offset using construct() with byid_.
+    // This builds a complete VariantArray with all references resolved in one pass
+    // (first write to each slot), avoiding the heap corruption from the
+    // Blank-to-shared_ptr transition that occurs when patching slots via set().
+    for (auto& [entity_id, offset_and_refs] : pending_lazy_refs_) {
+        auto& [file_offset, refs] = offset_and_refs;
+        if (refs.empty()) {
+            continue;
+        }
+        auto entity_it = byid_.find((uint32_t)entity_id);
+        if (entity_it == byid_.end()) {
+            continue;
+        }
+        auto* entity = entity_it->second;
+
+        // Re-parse from the saved file offset
+        auto reader = tokens->stream->clone();
+        reader.seek(file_offset);
+        IfcSpfLexer lexer(&reader);
+
+        Token datatype = lexer.Next();
+        if (!TokenFunc::isKeyword(datatype)) {
+            continue;
+        }
+        lexer.Next(); // skip '('
+
+        parse_context ps;
+        unresolved_references new_refs;
+        in_memory_file_storage temp_storage(file);
+        temp_storage.tokens = &lexer;
+        temp_storage.schema = schema;
+        temp_storage.references_to_resolve = &new_refs;
+
+        temp_storage.load(entity_id, entity->declaration().as_entity(), ps, -1);
+
+        // Construct with byid_ for inline resolution
+        auto data = ps.construct(entity_id, new_refs, &entity->declaration(), boost::none, -1, true, &byid_);
+
+        // Transfer simple type instances to the file's main storage
+        for (auto& inst : temp_storage.read_simple_type_instances) {
+            read_simple_type_instances.push_back(std::move(inst));
+        }
+
+        // Replace the entity's storage with the freshly-built one
+        auto& entity_data = entity->data();
+        delete entity_data.storage_;
+        entity_data.storage_ = data.storage_;
+        data.storage_ = nullptr;
+    }
+    pending_lazy_refs_.clear();
+}
+
 void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileReader* s, const IfcParse::schema_definition*& schema, unsigned int& max_id, const std::set<std::string>& typed_to_bypass, bool lazy) {
     // Initialize a "C" locale for locale-independent
     // number parsing. See comment above on line 41.
@@ -1753,6 +1860,18 @@ void IfcParse::impl::in_memory_file_storage::read_from_stream(IfcParse::FileRead
     }
 
     Logger::Status("Done resolving references");
+
+    // Resolve pending lazy refs: entities that were materialized during the
+    // GUID-check loop above may have had forward references that could not be
+    // resolved at that time because not all entities were in byid_ yet.
+    // Now that every entity has been inserted, we can resolve them.
+    if (lazy && !pending_lazy_refs_.empty()) {
+        resolve_pending_lazy_refs();
+    }
+
+    // Mark loading as complete so that future calls to materialize()
+    // resolve references inline instead of deferring.
+    loading_complete_ = true;
 }
 
 void IfcFile::recalculate_id_counter() {
@@ -1766,6 +1885,14 @@ void IfcFile::recalculate_id_counter() {
     }
     max_id_ = (unsigned int)k;
     */
+}
+
+void IfcFile::resolve_lazy_refs() {
+    std::visit([](auto& m) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(m)>, impl::in_memory_file_storage>) {
+            m.resolve_pending_lazy_refs();
+        }
+    }, storage_);
 }
 
 class traversal_recorder {
@@ -2931,17 +3058,39 @@ void IfcEntityInstanceData::materialize(IfcParse::IfcFile* file, const IfcParse:
     // Parse the attributes
     temp_storage.load(identity, decl->as_entity(), ps, -1);
 
+    // When loading is complete, pass byid_ so construct() resolves refs inline
+    // (first write to slot — no Blank-to-shared_ptr transition, no heap corruption).
+    // When loading is still in progress, defer as before.
+    const boost::unordered_map<uint32_t, IfcUtil::IfcBaseClass*>* byid_ptr = nullptr;
+    if (mem_storage->loading_complete_) {
+        byid_ptr = &mem_storage->byid_;
+    }
+
     // Construct the attribute storage
-    auto data = ps.construct(identity, refs, decl, boost::none, -1, true);
+    auto data = ps.construct(identity, refs, decl, boost::none, -1, true, byid_ptr);
+
+    // Transfer simple type instances (e.g. IFCREAL, IFCLABEL) to the file's
+    // main storage so they outlive this function.  Without this, pointers in
+    // the entity's VariantArray become dangling when temp_storage is destroyed.
+    for (auto& inst : temp_storage.read_simple_type_instances) {
+        mem_storage->read_simple_type_instances.push_back(std::move(inst));
+    }
 
     // Move the storage to this instance
+    auto saved_offset = lazy_file_offset_;
     storage_ = data.storage_;
     data.storage_ = nullptr;
     lazy_file_offset_ = LAZY_OFFSET_NONE;
 
-    // Note: unresolved references (refs) would need to be resolved, but for now
-    // we rely on the file having already resolved references during initial parse.
-    // Lazy materialization is most useful when the entity has no forward references.
+    // If byid was provided, refs were resolved inline and refs should be empty.
+    // Otherwise (during initial load), defer resolution as before.
+    // Save the file offset so resolve_pending_lazy_refs() can re-parse from scratch.
+    if (!refs.empty()) {
+        auto* file_storage = std::get_if<IfcParse::impl::in_memory_file_storage>(&file->storage_);
+        if (file_storage) {
+            file_storage->pending_lazy_refs_[identity] = std::make_pair(saved_offset, std::move(refs));
+        }
+    }
 }
 
 bool IfcParse::impl::rocks_db_file_storage::read_schema(const IfcParse::schema_definition*& schema) {

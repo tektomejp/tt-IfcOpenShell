@@ -128,3 +128,5 @@ src/ifcopenshell-python/ifcopenshell/express/*.exp.cache.dat
 *.claude
 *.py.tmp*
 *.json.tmp*
+build312/
+build312_debug/

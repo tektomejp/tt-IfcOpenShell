@@ -234,7 +234,7 @@ namespace {
     }
 }
 
-IfcEntityInstanceData IfcParse::parse_context::construct(boost::optional<size_t> name, unresolved_references& references_to_resolve, const IfcParse::declaration* decl, boost::optional<size_t> expected_size, int resolve_reference_index, bool coerce_attribute_count) {
+IfcEntityInstanceData IfcParse::parse_context::construct(boost::optional<size_t> name, unresolved_references& references_to_resolve, const IfcParse::declaration* decl, boost::optional<size_t> expected_size, int resolve_reference_index, bool coerce_attribute_count, const boost::unordered_map<uint32_t, IfcUtil::IfcBaseClass*>* byid) {
     std::vector<const IfcParse::parameter_type*> parameter_types;
     std::unique_ptr<IfcParse::named_type> transient_named_type;
 
@@ -289,13 +289,24 @@ IfcEntityInstanceData IfcParse::parse_context::construct(boost::optional<size_t>
 
         auto index = (uint8_t) std::distance(tokens_.begin(), it);
 
-        std::visit([this, &storage, name, &references_to_resolve, index, param_type, resolve_reference_index](const auto& v) {
+        std::visit([this, &storage, name, &references_to_resolve, index, param_type, resolve_reference_index, byid](const auto& v) {
             if constexpr (std::is_same_v<std::decay_t<decltype(v)>, IfcParse::Token>) {
-                dispatch_token(name, index, v, param_type && param_type->as_named_type() ? param_type->as_named_type()->declared_type() : nullptr, [this, &storage, name, &references_to_resolve, index, resolve_reference_index](auto v) {
+                dispatch_token(name, index, v, param_type && param_type->as_named_type() ? param_type->as_named_type()->declared_type() : nullptr, [this, &storage, name, &references_to_resolve, index, resolve_reference_index, byid](auto v) {
                     if constexpr (std::is_same_v<std::decay_t<decltype(v)>, IfcParse::reference_or_simple_type>) {
-                        if (name) {
+                        if (byid) {
+                            // Resolve inline — this is the first write to the slot,
+                            // avoiding the Blank-to-pointer transition that causes heap corruption.
+                            if (auto* ref = std::get_if<InstanceReference>(&v)) {
+                                auto it = byid->find(*ref);
+                                if (it != byid->end()) {
+                                    storage.set(index, it->second);
+                                }
+                            } else if (auto* inst = std::get_if<IfcUtil::IfcBaseClass*>(&v)) {
+                                storage.set(index, *inst);
+                            }
+                        } else if (name) {
                             references_to_resolve.push_back(std::make_pair(
-                                // @todo previously this was storage but apparently the 
+                                // @todo previously this was storage but apparently the
                                 // pointer is not constant with the moving and temporary nature
                                 // maybe it ought to be and in that case a pointer is more direct
                                 MutableAttributeValue{ (uint32_t) *name, resolve_reference_index == -1 ? index : (uint8_t) resolve_reference_index },
@@ -313,13 +324,47 @@ IfcEntityInstanceData IfcParse::parse_context::construct(boost::optional<size_t>
                         pt = pt->as_named_type()->declared_type()->as_type_declaration()->declared_type();
                     }
                 }
-                construct_<0>(name, index, *v, pt ? pt->as_aggregation_type() : nullptr, [this, &storage, name, &references_to_resolve, index, resolve_reference_index](const auto& v) {
+                construct_<0>(name, index, *v, pt ? pt->as_aggregation_type() : nullptr, [this, &storage, name, &references_to_resolve, index, resolve_reference_index, byid](const auto& v) {
                     if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::vector<reference_or_simple_type>>) {
-                        if (name) {
+                        if (byid) {
+                            // Resolve aggregate inline
+                            aggregate_of_instance::ptr agg(new aggregate_of_instance);
+                            for (const auto& vi : v) {
+                                if (auto* ref = std::get_if<InstanceReference>(&vi)) {
+                                    auto it = byid->find(*ref);
+                                    if (it != byid->end()) {
+                                        agg->push(it->second);
+                                    }
+                                } else if (auto* inst = std::get_if<IfcUtil::IfcBaseClass*>(&vi)) {
+                                    agg->push(*inst);
+                                }
+                            }
+                            if (agg->size() > 0) {
+                                storage.set(index, agg);
+                            }
+                        } else if (name) {
                             references_to_resolve.push_back({ { (uint32_t) *name, resolve_reference_index == -1 ? index : (uint8_t)resolve_reference_index }, v });
                         }
                     } else if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::vector<std::vector<reference_or_simple_type>>>) {
-                        if (name) {
+                        if (byid) {
+                            // Resolve 2D aggregate inline
+                            aggregate_of_aggregate_of_instance::ptr agg(new aggregate_of_aggregate_of_instance);
+                            for (const auto& vi : v) {
+                                std::vector<IfcUtil::IfcBaseClass*> inner;
+                                for (const auto& vii : vi) {
+                                    if (auto* ref = std::get_if<InstanceReference>(&vii)) {
+                                        auto it = byid->find(*ref);
+                                        if (it != byid->end()) {
+                                            inner.push_back(it->second);
+                                        }
+                                    } else if (auto* inst = std::get_if<IfcUtil::IfcBaseClass*>(&vii)) {
+                                        inner.push_back(*inst);
+                                    }
+                                }
+                                agg->push(inner);
+                            }
+                            storage.set(index, agg);
+                        } else if (name) {
                             references_to_resolve.push_back({ { (uint32_t) *name, resolve_reference_index == -1 ? index : (uint8_t)resolve_reference_index }, v });
                         }
                     } else {

@@ -446,6 +446,12 @@ public:
     void unbatch();
 
     void reset_identity_cache();
+
+    /// Resolve pending lazy entity references.  Call after materializing
+    /// lazy entities (e.g. after iterating all entities and accessing an
+    /// attribute) to fix up cross-entity references that were deferred
+    /// during materialization.
+    void resolve_lazy_refs();
 };
 
 #ifdef WITH_IFCXML

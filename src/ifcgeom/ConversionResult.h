@@ -201,6 +201,7 @@ namespace IfcGeom {
 			}
 		}
 	public:
+#ifndef SWIG
 		template <
 			typename... Args,
 			typename = std::enable_if_t<
@@ -211,6 +212,12 @@ namespace IfcGeom {
 		explicit OpaqueCoordinate(Args... args) {
 			init_<0>(args...);
 		}
+#else
+		template <typename... Args>
+		OpaqueCoordinate(Args... args) {
+			init_<0>(args...);
+		}
+#endif
 
 		OpaqueCoordinate() {
 			for (auto it = values.begin(); it != values.end(); ++it) {
