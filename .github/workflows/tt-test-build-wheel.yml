@@ -1,0 +1,110 @@
+name: Test Build Wheel (no release)
+
+# Manual-only. Use this to test the C++ build + wheel assembly locally
+# with `act` or on GitHub Actions without creating a release.
+#
+# Local usage:
+#   act workflow_dispatch -W .github/workflows/tt-test-build-wheel.yml \
+#     --container-architecture linux/amd64
+#
+# GitHub: Actions tab -> "Test Build Wheel (no release)" -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp in the wheel (default: 0.0.0-test)"
+        required: false
+        default: "0.0.0.dev1"
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ github.event.inputs.version || '0.0.0.dev1' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: build
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        shell: bash -el {0}
+        run: |
+          conda install -y -c conda-forge \
+            cmake ninja swig \
+            boost-cpp libboost-devel \
+            occt cgal-cpp \
+            eigen gmp mpfr \
+            libxml2 nlohmann_json zlib \
+            python=3.12 numpy setuptools
+
+      - name: Configure CMake
+        shell: bash -el {0}
+        run: |
+          mkdir build && cd build
+          cmake ../cmake \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_IFCPYTHON=ON \
+            -DBUILD_IFCGEOM=ON \
+            -DBUILD_CONVERT=OFF \
+            -DBUILD_GEOMSERVER=OFF \
+            -DWITH_OPENCASCADE=ON \
+            -DWITH_CGAL=ON \
+            -DCOLLADA_SUPPORT=OFF \
+            -DGLTF_SUPPORT=OFF \
+            -DHDF5_SUPPORT=OFF \
+            -DIFCXML_SUPPORT=ON \
+            "-DSCHEMA_VERSIONS=2x3;4;4x3_add2"
+
+      - name: Build C++ library
+        shell: bash -el {0}
+        run: |
+          cd build
+          ninja -j$(( $(nproc) / 2 + 1 ))
+
+      - name: Assemble wheel
+        shell: bash -el {0}
+        run: |
+          PYDIR=src/ifcopenshell-python/ifcopenshell
+          DISTDIR=src/ifcopenshell-python/dist
+
+          cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
+          cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
+
+          sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' src/ifcopenshell-python/pyproject.toml
+
+          pip install build wheel
+          python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
+
+          wheel tags \
+            --remove \
+            --python-tag=cp312 \
+            --abi-tag=cp312 \
+            --platform-tag=linux_x86_64 \
+            "$DISTDIR"/*.whl
+
+          echo "Final wheel:"
+          ls -lh "$DISTDIR"/*.whl
+
+      - name: Verify wheel installs and works
+        shell: bash -el {0}
+        run: |
+          WHEEL_NAME="ifcopenshell-${VERSION}-cp312-cp312-linux_x86_64.whl"
+          pip install "src/ifcopenshell-python/dist/${WHEEL_NAME}"
+          python -c "
+          import ifcopenshell
+          print(f'version : {ifcopenshell.version}')
+          print(f'schemas : {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
+          f = ifcopenshell.file(schema='IFC4')
+          f.createIfcProject('smoke-test')
+          print('Smoke test passed')
+          "
