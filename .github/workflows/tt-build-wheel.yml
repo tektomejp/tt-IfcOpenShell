@@ -1,7 +1,7 @@
 name: Build Python Wheel and Create Release
 
-# Triggers on version tags pushed to tt-dev branch only.
-# Tag format: vX.Y.Z (e.g., v0.8.5, v0.8.5.1)
+# Triggers on version tags only.
+# Tag format: vX.Y.Z or vX.Y.Z.N (e.g., v0.8.5, v0.8.5.1)
 on:
   push:
     tags:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version_override:
-        description: "Version to embed in the wheel (e.g. 0.8.5). Leave empty to use tag."
+        description: "Version to embed in the wheel (e.g. 0.8.5). Leave empty to use latest tag."
         required: false
 
 jobs:
@@ -31,20 +31,18 @@ jobs:
             if [[ -n "${{ github.event.inputs.version_override }}" ]]; then
               VERSION="${{ github.event.inputs.version_override }}"
             else
-              TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+              TAG=$(git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 2>/dev/null || echo "v0.0.0")
               VERSION=${TAG#v}
             fi
             echo "Manual run, version: $VERSION"
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-            echo "is_tag_push=false" >> $GITHUB_OUTPUT
           else
             TAG=${GITHUB_REF#refs/tags/}
             VERSION=${TAG#v}
             echo "Tag push: $TAG -> version $VERSION"
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "tag=$TAG" >> $GITHUB_OUTPUT
-            echo "is_tag_push=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Validate tag format
@@ -63,8 +61,15 @@ jobs:
           CURRENT_TAG="${{ steps.version.outputs.tag }}"
           CURRENT_VERSION="${{ steps.version.outputs.version }}"
 
-          # Get all matching tags sorted by version, excluding current
-          PREVIOUS_TAG=$(git tag -l 'v[0-9]*' | grep -v "^${CURRENT_TAG}$" | sort -V | tail -n 1)
+          # Only compare against tags that match our strict vX.Y.Z[.N] format.
+          # This excludes upstream tags like v0.7.0-alpha0 or v0.7.0-validation.
+          PREVIOUS_TAG=$(
+            git tag -l 'v*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.?[0-9]*$' \
+            | grep -v "^${CURRENT_TAG}$" \
+            | sort -V \
+            | tail -n 1
+          )
 
           if [ -z "$PREVIOUS_TAG" ]; then
             echo "No previous version tags found. First release!"
@@ -88,6 +93,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate-tag.outputs.version }}
+      WHEEL_NAME: ifcopenshell-${{ needs.validate-tag.outputs.version }}-cp312-cp312-linux_x86_64.whl
 
     steps:
       - name: Checkout code
@@ -141,39 +147,42 @@ jobs:
       - name: Assemble wheel
         shell: bash -el {0}
         run: |
-          # Copy built artifacts into the Python package
           PYDIR=src/ifcopenshell-python/ifcopenshell
+          DISTDIR=src/ifcopenshell-python/dist
+
+          # Copy built .so and wrapper into the Python package tree
           cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
-          cp build/ifcwrap/ifcopenshell_wrapper.py "$PYDIR/"
+          cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
 
-          # Set version in pyproject.toml
-          cd src/ifcopenshell-python
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+          # Stamp the version into pyproject.toml (replaces the 0.0.0 placeholder)
+          sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' src/ifcopenshell-python/pyproject.toml
 
-          # Build wheel then retag with correct platform tags.
-          # python -m build produces a pure "py3-none-any" wheel, but we
-          # ship a platform-specific .so inside it.
+          # Build a pure-Python wheel (tags: py3-none-any)
           pip install build wheel
-          python -m build --wheel
+          python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
 
-          # Retag: py3-none-any → cp312-cp312-linux_x86_64
-          cd dist
-          python -m wheel tags --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 *.whl
+          # Retag to platform-specific (cp312-cp312-linux_x86_64) and remove
+          # the original pure wheel so only one .whl remains in dist/.
+          wheel tags \
+            --remove \
+            --python-tag=cp312 \
+            --abi-tag=cp312 \
+            --platform-tag=linux_x86_64 \
+            "$DISTDIR"/*.whl
 
-          echo "Built wheels:"
-          ls -lh *.whl
+          echo "Final wheel:"
+          ls -lh "$DISTDIR"/*.whl
 
-      - name: Verify wheel installs
+      - name: Verify wheel installs and works
         shell: bash -el {0}
         run: |
-          pip install src/ifcopenshell-python/dist/*.whl
+          pip install "src/ifcopenshell-python/dist/${WHEEL_NAME}"
           python -c "
           import ifcopenshell
-          print(f'ifcopenshell version: {ifcopenshell.version}')
-          print(f'Schema: {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
-          # Quick smoke test
+          print(f'version : {ifcopenshell.version}')
+          print(f'schemas : {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
           f = ifcopenshell.file(schema='IFC4')
-          f.createIfcProject('test')
+          f.createIfcProject('smoke-test')
           print('Smoke test passed')
           "
 
@@ -181,33 +190,27 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ifcopenshell-wheel
-          path: src/ifcopenshell-python/dist/*.whl
+          path: src/ifcopenshell-python/dist/${{ env.WHEEL_NAME }}
           retention-days: 90
 
       - name: Create GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: src/ifcopenshell-python/dist/*.whl
+          files: src/ifcopenshell-python/dist/${{ env.WHEEL_NAME }}
           generate_release_notes: true
           draft: false
           prerelease: false
           body: |
             ## ifcopenshell ${{ env.VERSION }} (tt-IfcOpenShell fork)
 
-            Built from `tt-dev` branch with lazy loading support.
+            Built from commit ${{ github.sha }} with lazy loading support.
 
             ### Install
-            ```bash
-            pip install ifcopenshell --force-reinstall \
-              --index-url https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/
             ```
-            Or directly:
-            ```bash
-            pip install "$(gh release view ${{ needs.validate-tag.outputs.tag }} --repo tektomejp/tt-IfcOpenShell --json assets -q '.assets[0].url')"
+            pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/${{ env.WHEEL_NAME }}
             ```
 
             ### Platform
-            - Linux x86_64
-            - Python 3.12
+            - Linux x86_64, Python 3.12
           token: ${{ secrets.GITHUB_TOKEN }}
