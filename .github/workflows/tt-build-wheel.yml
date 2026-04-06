@@ -90,6 +90,10 @@ jobs:
   build-wheel:
     needs: validate-tag
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     env:
       VERSION: ${{ needs.validate-tag.outputs.version }}
 
@@ -99,12 +103,19 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Derive Python tag
+        id: pytag
+        run: |
+          CPVER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          echo "cpver=cp${CPVER}" >> $GITHUB_OUTPUT
+          echo "Python ${{ matrix.python-version }} -> cp${CPVER}"
+
       - name: Set up Miniconda
         uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
           activate-environment: build
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install build dependencies
         shell: bash -el {0}
@@ -115,7 +126,7 @@ jobs:
             occt cgal-cpp \
             eigen gmp mpfr \
             libxml2 nlohmann_json zlib \
-            python=3.12 numpy setuptools
+            python=${{ matrix.python-version }} numpy setuptools
 
       - name: Configure CMake
         shell: bash -el {0}
@@ -145,34 +156,26 @@ jobs:
       - name: Assemble wheel
         shell: bash -el {0}
         run: |
+          PYTAG=${{ steps.pytag.outputs.cpver }}
           PYDIR=src/ifcopenshell-python/ifcopenshell
           DISTDIR=src/ifcopenshell-python/dist
           REPAIRED=src/ifcopenshell-python/repaired
 
-          # Copy built .so and wrapper into the Python package tree
           cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
           cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
 
-          # Stamp version
           sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' src/ifcopenshell-python/pyproject.toml
 
-          # Build a pure-Python wheel, then retag so auditwheel sees it as
-          # a platform wheel (it refuses to repair "none-any" wheels).
           pip install build auditwheel wheel
           python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
           wheel tags --remove \
-            --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 \
+            --python-tag="$PYTAG" --abi-tag="$PYTAG" --platform-tag=linux_x86_64 \
             "$DISTDIR"/*.whl
 
-          # Bundle all shared libs (OCCT, GMP, MPFR, libxml2, etc.) into the
-          # wheel.  auditwheel auto-detects the manylinux tag from glibc symbols.
           LD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
             auditwheel repair "$DISTDIR"/*.whl \
               -w "$REPAIRED"
 
-          # Retag to linux_x86_64 so pip accepts the wheel regardless of the
-          # host glibc version.  The bundled libs and patched RPATHs from
-          # auditwheel are preserved.
           wheel tags --remove \
             --platform-tag=linux_x86_64 \
             "$REPAIRED"/*.whl
@@ -190,36 +193,57 @@ jobs:
           print(f'schemas : {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
           f = ifcopenshell.file(schema='IFC4')
           f.createIfcProject('smoke-test')
-          print('Smoke test passed')
+          print('Smoke test passed (Python ${{ matrix.python-version }})')
           "
 
       - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ifcopenshell-wheel
+          name: wheel-${{ steps.pytag.outputs.cpver }}
           path: src/ifcopenshell-python/repaired/*.whl
           retention-days: 90
 
+  release:
+    needs: [validate-tag, build-wheel]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.validate-tag.outputs.version }}
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: wheels
+
+      - name: List wheels
+        run: ls -lh wheels/*.whl
+
       - name: Create GitHub Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: src/ifcopenshell-python/repaired/*.whl
+          files: wheels/*.whl
           generate_release_notes: true
           draft: false
           prerelease: false
           body: |
             ## ifcopenshell ${{ env.VERSION }} (tt-IfcOpenShell fork)
 
-            Self-contained wheel with bundled OCCT, CGAL dependencies.
+            Self-contained wheels with bundled OCCT, CGAL dependencies.
             Built from commit ${{ github.sha }} with lazy loading support.
 
-            ### Install
+            ### Install (pick your Python version)
             ```
             pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/ifcopenshell-${{ env.VERSION }}-cp312-cp312-linux_x86_64.whl
+            pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/ifcopenshell-${{ env.VERSION }}-cp313-cp313-linux_x86_64.whl
+            pip install https://github.com/tektomejp/tt-IfcOpenShell/releases/download/${{ needs.validate-tag.outputs.tag }}/ifcopenshell-${{ env.VERSION }}-cp314-cp314-linux_x86_64.whl
             ```
 
             ### Platform
-            - Linux x86_64, Python 3.12
+            - Linux x86_64, Python 3.12 / 3.13 / 3.14
             - Self-contained: OCCT, GMP, MPFR, libxml2 bundled inside
           token: ${{ secrets.GITHUB_TOKEN }}

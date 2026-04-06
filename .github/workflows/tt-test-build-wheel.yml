@@ -19,6 +19,10 @@ on:
 jobs:
   build-wheel:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     env:
       VERSION: ${{ github.event.inputs.version || '0.0.0.dev1' }}
 
@@ -28,12 +32,20 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Derive Python tag
+        id: pytag
+        run: |
+          # "3.12" -> "cp312", "3.13" -> "cp313", etc.
+          CPVER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          echo "cpver=cp${CPVER}" >> $GITHUB_OUTPUT
+          echo "Python ${{ matrix.python-version }} -> cp${CPVER}"
+
       - name: Set up Miniconda
         uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
           activate-environment: build
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install build dependencies
         shell: bash -el {0}
@@ -44,7 +56,7 @@ jobs:
             occt cgal-cpp \
             eigen gmp mpfr \
             libxml2 nlohmann_json zlib \
-            python=3.12 numpy setuptools
+            python=${{ matrix.python-version }} numpy setuptools
 
       - name: Configure CMake
         shell: bash -el {0}
@@ -74,6 +86,7 @@ jobs:
       - name: Assemble wheel
         shell: bash -el {0}
         run: |
+          PYTAG=${{ steps.pytag.outputs.cpver }}
           PYDIR=src/ifcopenshell-python/ifcopenshell
           DISTDIR=src/ifcopenshell-python/dist
           REPAIRED=src/ifcopenshell-python/repaired
@@ -90,19 +103,15 @@ jobs:
           pip install build auditwheel wheel
           python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
           wheel tags --remove \
-            --python-tag=cp312 --abi-tag=cp312 --platform-tag=linux_x86_64 \
+            --python-tag="$PYTAG" --abi-tag="$PYTAG" --platform-tag=linux_x86_64 \
             "$DISTDIR"/*.whl
 
-          # Bundle all shared libs (OCCT, GMP, MPFR, libxml2, etc.) into the
-          # wheel.  auditwheel auto-detects the manylinux tag from glibc symbols.
+          # Bundle all shared libs (OCCT, GMP, MPFR, libxml2, etc.) into the wheel.
           LD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
             auditwheel repair "$DISTDIR"/*.whl \
               -w "$REPAIRED"
 
-          # Retag to linux_x86_64 so pip accepts the wheel regardless of the
-          # host glibc version.  The bundled libs and patched RPATHs from
-          # auditwheel are preserved — only the tag in the filename/metadata
-          # changes.
+          # Retag to linux_x86_64 so pip accepts on any Linux glibc version.
           wheel tags --remove \
             --platform-tag=linux_x86_64 \
             "$REPAIRED"/*.whl
@@ -113,7 +122,6 @@ jobs:
       - name: Verify wheel installs and works
         shell: bash -el {0}
         run: |
-          # Install from repaired dir (only one .whl there)
           pip install src/ifcopenshell-python/repaired/*.whl
           python -c "
           import ifcopenshell
