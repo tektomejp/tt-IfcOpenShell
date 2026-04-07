@@ -63,10 +63,15 @@ jobs:
       - name: Install build dependencies
         shell: bash -el {0}
         run: |
+          # Pin cgal-cpp>=5.6.2 to avoid CGAL bug #8313: operator bool() in
+          # Halfedge_around_*_iterator calls this->base() which doesn't exist.
+          # GCC silently skips it (unused template method), but Apple Clang 16+
+          # (macOS 15) enforces two-phase name lookup and errors out.
+          # Fixed in CGAL 5.6.2 by removing the broken operator bool() entirely.
           PKGS=(
             cmake ninja swig
             boost-cpp libboost-devel
-            occt cgal-cpp
+            occt "cgal-cpp>=5.6.2"
             eigen gmp mpfr
             libxml2 nlohmann_json zlib
             "python=${{ matrix.python-version }}" numpy setuptools
