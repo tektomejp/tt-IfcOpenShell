@@ -1,0 +1,181 @@
+name: Test Build Wheel (cross-platform)
+
+# Test-builds wheels for Linux x86_64, macOS Intel (x86_64), and macOS ARM64.
+# All 9 jobs (3 Python versions × 3 platforms) run in parallel; any failure
+# cancels the rest (fail-fast).
+#
+# Manual-only — no release artifacts are published.
+#
+# GitHub: Actions tab → "Test Build Wheel (cross-platform)" → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp in the wheel (default: 0.0.0.dev1)"
+        required: false
+        default: "0.0.0.dev1"
+
+jobs:
+  build-wheel:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+        os: [ubuntu-22.04, macos-13, macos-14]
+        include:
+          # Linux x86_64
+          - os: ubuntu-22.04
+            platform_tag: linux_x86_64
+            macos_target: ""
+          # macOS Intel
+          - os: macos-13
+            platform_tag: macosx_10_13_x86_64
+            macos_target: "10.13"
+          # macOS Apple Silicon
+          - os: macos-14
+            platform_tag: macosx_11_0_arm64
+            macos_target: "11.0"
+    env:
+      VERSION: ${{ github.event.inputs.version || '0.0.0.dev1' }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Derive Python tag
+        id: info
+        run: |
+          CPVER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          echo "cpver=cp${CPVER}" >> $GITHUB_OUTPUT
+          echo "Python ${{ matrix.python-version }} -> cp${CPVER} | ${{ matrix.os }} (${{ matrix.platform_tag }})"
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: build
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build dependencies
+        shell: bash -el {0}
+        run: |
+          PKGS=(
+            cmake ninja swig
+            boost-cpp libboost-devel
+            occt cgal-cpp
+            eigen gmp mpfr
+            libxml2 nlohmann_json zlib
+            "python=${{ matrix.python-version }}" numpy setuptools
+          )
+
+          # patchelf is only needed on Linux (used by auditwheel)
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            PKGS+=(patchelf)
+          fi
+
+          conda install -y -c conda-forge "${PKGS[@]}"
+
+      - name: Configure CMake
+        shell: bash -el {0}
+        run: |
+          mkdir build && cd build
+
+          CMAKE_EXTRA_ARGS=()
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export LDFLAGS="${LDFLAGS:-} -Wl,-flat_namespace,-undefined,suppress"
+            CMAKE_EXTRA_ARGS+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }}")
+          fi
+
+          cmake ../cmake \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_IFCPYTHON=ON \
+            -DBUILD_IFCGEOM=ON \
+            -DBUILD_CONVERT=OFF \
+            -DBUILD_GEOMSERVER=OFF \
+            -DWITH_OPENCASCADE=ON \
+            -DWITH_CGAL=ON \
+            -DCOLLADA_SUPPORT=OFF \
+            -DGLTF_SUPPORT=OFF \
+            -DHDF5_SUPPORT=OFF \
+            -DIFCXML_SUPPORT=ON \
+            "-DSCHEMA_VERSIONS=2x3;4;4x3_add2" \
+            "${CMAKE_EXTRA_ARGS[@]}"
+
+      - name: Build C++ library
+        shell: bash -el {0}
+        run: |
+          cd build
+
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export LDFLAGS="${LDFLAGS:-} -Wl,-flat_namespace,-undefined,suppress"
+            JOBS=$(( $(sysctl -n hw.logicalcpu) / 2 + 1 ))
+          else
+            JOBS=$(( $(nproc) / 2 + 1 ))
+          fi
+
+          ninja -j"$JOBS"
+
+      - name: Assemble wheel
+        shell: bash -el {0}
+        run: |
+          PYTAG=${{ steps.info.outputs.cpver }}
+          PYDIR=src/ifcopenshell-python/ifcopenshell
+          DISTDIR=src/ifcopenshell-python/dist
+          REPAIRED=src/ifcopenshell-python/repaired
+
+          # Copy built C++ extension and SWIG wrapper into the Python package
+          cp build/ifcwrap/_ifcopenshell_wrapper*.so "$PYDIR/"
+          cp build/ifcwrap/ifcopenshell_wrapper.py   "$PYDIR/"
+
+          # Stamp version (BSD sed on macOS, GNU sed on Linux)
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' 's/^version = ".*"/version = "'"${VERSION}"'"/' \
+              src/ifcopenshell-python/pyproject.toml
+          else
+            sed -i 's/^version = ".*"/version = "'"${VERSION}"'"/' \
+              src/ifcopenshell-python/pyproject.toml
+          fi
+
+          # Build a pure-Python wheel, then retag as a platform wheel
+          pip install build wheel
+          python -m build --wheel src/ifcopenshell-python --outdir "$DISTDIR"
+          wheel tags --remove \
+            --python-tag="$PYTAG" --abi-tag="$PYTAG" \
+            --platform-tag="${{ matrix.platform_tag }}" \
+            "$DISTDIR"/*.whl
+
+          # Bundle shared libraries into the wheel
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            pip install auditwheel
+            LD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
+              auditwheel repair "$DISTDIR"/*.whl -w "$REPAIRED"
+            # Retag to generic linux_x86_64 so pip accepts any glibc
+            wheel tags --remove \
+              --platform-tag="${{ matrix.platform_tag }}" \
+              "$REPAIRED"/*.whl
+          else
+            pip install delocate
+            DYLD_LIBRARY_PATH="$CONDA_PREFIX/lib" \
+              delocate-wheel -w "$REPAIRED" -v "$DISTDIR"/*.whl
+          fi
+
+          echo "Final wheel:"
+          ls -lh "$REPAIRED"/*.whl
+
+      - name: Verify wheel installs and works
+        shell: bash -el {0}
+        run: |
+          pip install src/ifcopenshell-python/repaired/*.whl
+          python -c "
+          import ifcopenshell
+          print(f'version : {ifcopenshell.version}')
+          print(f'schemas : {ifcopenshell.ifcopenshell_wrapper.schema_names()}')
+          f = ifcopenshell.file(schema='IFC4')
+          f.createIfcProject('smoke-test')
+          print('Smoke test passed (${{ matrix.os }}, Python ${{ matrix.python-version }})')
+          "
