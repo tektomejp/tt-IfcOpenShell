@@ -70,7 +70,7 @@ jobs:
           # Fixed in CGAL 5.6.2 by removing the broken operator bool() entirely.
           PKGS=(
             cmake ninja swig
-            boost-cpp libboost-devel
+            libboost-devel
             occt "cgal-cpp>=5.6.2"
             eigen gmp mpfr
             libxml2 nlohmann_json zlib
